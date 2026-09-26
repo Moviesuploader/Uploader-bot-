@@ -94,6 +94,123 @@ function normalize(data, shareUrl) {
   };
 }
 
+
+function findMediaUrl(value, depth = 0) {
+  if (depth > 6 || value == null) return '';
+  if (typeof value === 'string') {
+    if (/^https?:\/\//i.test(value) && (/\.(mp4|m4v|webm|mkv)(?:[?#]|$)/i.test(value) || /amazonaws|cloudfront|cdn/i.test(value))) return value;
+    return '';
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findMediaUrl(item, depth + 1);
+      if (found) return found;
+    }
+    return '';
+  }
+  if (typeof value === 'object') {
+    const preferred = ['downloadUrl','download_url','signed_url','stream_url','file_url','url'];
+    for (const key of preferred) {
+      if (key in value) {
+        const found = findMediaUrl(value[key], depth + 1);
+        if (found) return found;
+      }
+    }
+    for (const item of Object.values(value)) {
+      const found = findMediaUrl(item, depth + 1);
+      if (found) return found;
+    }
+  }
+  return '';
+}
+
+async function callBrowserResolver(shareUrl, timeoutMs) {
+  if (String(process.env.DISKWALA_BROWSER_RESOLVER || '1') === '0') return null;
+
+  let chromium;
+  try {
+    ({ chromium } = await import('playwright-core'));
+  } catch {
+    return null;
+  }
+
+  const executablePath =
+    process.env.CHROMIUM_PATH ||
+    ['/usr/bin/chromium-browser', '/usr/bin/chromium'].find((v) => {
+      try { return requireFsAccess(v); } catch { return false; }
+    });
+
+  const browser = await chromium.launch({
+    headless: true,
+    ...(executablePath ? { executablePath } : {}),
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+  });
+
+  let captured = null;
+  let metadata = null;
+  try {
+    const context = await browser.newContext({ userAgent: UA, viewport: { width: 1280, height: 720 } });
+    const page = await context.newPage();
+
+    const done = new Promise((resolve) => {
+      page.on('response', async (response) => {
+        try {
+          const url = response.url();
+          if (!url.includes('diskwala.com') || response.status() !== 200) return;
+          if (!/\/file\/(sign|temp_info)/.test(url)) return;
+          const body = await response.json();
+          if (url.includes('/file/temp_info')) metadata = body;
+          const media = findMediaUrl(body);
+          if (media && !captured) {
+            captured = { body, media };
+            resolve();
+          }
+        } catch {}
+      });
+    });
+
+    await page.goto(shareUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: Math.max(20_000, Math.min(timeoutMs, 45_000)),
+    });
+
+    // Some versions request the signed URL only after Play/Download is clicked.
+    for (const selector of ['button:has-text("Download")', 'button:has-text("Play")', 'video', '[class*="play" i]']) {
+      try {
+        await page.locator(selector).first().click({ timeout: 1200 });
+        break;
+      } catch {}
+    }
+
+    await Promise.race([
+      done,
+      new Promise((resolve) => setTimeout(resolve, Math.max(8_000, Math.min(timeoutMs, 20_000)))),
+    ]);
+
+    if (!captured?.media) throw new Error('official page produced no public signed media URL');
+
+    const metaFile = metadata?.fileInfo || metadata?.data?.fileInfo || metadata?.data?.file || metadata?.file || {};
+    return normalize({
+      fileInfo: {
+        ...metaFile,
+        name: metaFile.name || 'diskwala.mp4',
+        url: captured.media,
+      },
+    }, shareUrl);
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+function requireFsAccess(path) {
+  try {
+    process.binding('fs').internalModuleStat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function callResolver(base, shareUrl, timeoutMs) {
   const signal = AbortSignal.timeout(timeoutMs);
   const encoded = encodeURIComponent(shareUrl);
@@ -132,6 +249,17 @@ export async function resolveInfo(shareUrl, ctx) {
       failures.push(`api-key resolver: ${err.message}`);
       console.warn('[diskwala] API-key resolver failed; trying public fallback:', err.message);
     }
+  }
+
+  // SESSION-free fallback: run DiskWala's own public web client in Chromium.
+  // The page creates its own first-party signed request; we only observe the
+  // resulting public media URL. No Telegram user session or Mini-App token.
+  try {
+    const result = await callBrowserResolver(shareUrl, ctx.timeoutMs);
+    if (result) return result;
+  } catch (err) {
+    failures.push(`browser resolver: ${err.message}`);
+    console.warn('[diskwala] browser resolver failed; trying legacy resolver:', err.message);
   }
 
   for (const resolver of resolverList()) {
