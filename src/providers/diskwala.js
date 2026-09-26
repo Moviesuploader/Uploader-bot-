@@ -94,7 +94,11 @@ async function callPublicDiskwala(shareUrl, timeoutMs) {
 }
 
 async function callApiKeyProxy(shareUrl, timeoutMs) {
-  const proxyUrl = String(process.env.DISKWALA_API_URL || process.env.DISKWALA_PROXY_URL || '').trim();
+  const proxyUrl = String(
+    process.env.DISKWALA_API_URL ||
+    process.env.DISKWALA_PROXY_URL ||
+    'https://api.teraboxdl.site/api/v1/diskwala/extract'
+  ).trim();
   const apiKey = String(process.env.DISKWALA_API_KEY || '').trim();
   if (!proxyUrl || !apiKey) return null;
 
@@ -305,7 +309,7 @@ export async function resolveInfo(shareUrl, ctx) {
 
   // Preferred SESSION-free route: an API-key resolver supplied by the owner.
   // Secrets stay in deployment environment variables and are never committed.
-  if ((process.env.DISKWALA_API_URL || process.env.DISKWALA_PROXY_URL) && process.env.DISKWALA_API_KEY) {
+  if (process.env.DISKWALA_API_KEY) {
     try {
       const result = await callApiKeyProxy(shareUrl, ctx.timeoutMs);
       if (result) return result;
