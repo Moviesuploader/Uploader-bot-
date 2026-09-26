@@ -188,7 +188,63 @@ async function resolveWithCookie(shareUrl, cookie, ctx) {
   };
 }
 
+const SAMRA_API = 'https://desibotz-terabox-api.krishnalucky193.workers.dev/api';
+
+function normalizeSamra(data, shareUrl) {
+  const root = data?.data || data?.result || data;
+  const rawFiles = root?.files || root?.list || root?.file || (Array.isArray(root) ? root : [root]);
+  const arr = Array.isArray(rawFiles) ? rawFiles : [rawFiles];
+  const files = arr.map((f) => {
+    if (!f || typeof f !== 'object') return null;
+    const dlink = f.download_url || f.downloadUrl || f.dlink || f.direct_link || f.direct_url || f.url || '';
+    const stream = f.stream_url || f.streamUrl || f.m3u8 || f.play_url || '';
+    const link = dlink || stream;
+    if (!/^https?:\/\//i.test(String(link))) return null;
+    const size = Number(f.size_bytes || f.size || 0) || 0;
+    return {
+      name: f.name || f.filename || f.server_filename || f.title || 'terabox.mp4',
+      size: typeof f.size === 'string' && /[a-z]/i.test(f.size) ? f.size : formatSize(size),
+      size_bytes: size,
+      thumbnail: f.thumbnail || f.thumb || f.image || '',
+      dlink: String(link),
+      stream_url: stream ? String(stream) : '',
+      is_dir: false,
+      path: '',
+      fs_id: f.fs_id ? String(f.fs_id) : '',
+    };
+  }).filter(Boolean);
+  if (!files.length) return null;
+  return { provider: name, share_url: shareUrl, final_url: shareUrl, surl: extractSurl(shareUrl) || '', title: root?.title || files[0].name, files };
+}
+
+async function resolveWithSamra(shareUrl, ctx) {
+  const base = String(process.env.TERABOX_API_URL || SAMRA_API).trim();
+  const u = new URL(base);
+  u.searchParams.set('url', shareUrl);
+  const resp = await fetch(u, {
+    headers: { 'User-Agent': UA, Accept: 'application/json' },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(ctx.timeoutMs),
+  });
+  const raw = await resp.text();
+  if (!resp.ok) throw new Error(`SAMRA API HTTP ${resp.status}`);
+  let data;
+  try { data = JSON.parse(raw); } catch { throw new Error('SAMRA API returned invalid JSON'); }
+  const result = normalizeSamra(data, shareUrl);
+  if (!result) throw new Error('SAMRA API returned no downloadable file');
+  return result;
+}
+
 export async function resolveInfo(shareUrl, ctx) {
+  // Fast cookie-free API first; fall back to the original Terabox engine.
+  if (String(process.env.TERABOX_SAMRA_API || '1') !== '0') {
+    try {
+      return await resolveWithSamra(shareUrl, ctx);
+    } catch (err) {
+      console.warn('[terabox] SAMRA API failed; trying original engine:', err.message);
+    }
+  }
+
   const attempts = Math.max(1, Math.min(ctx.cookies.size || 1, 3));
   let lastError = 'Resolution failed';
   for (let i = 0; i < attempts; i += 1) {
