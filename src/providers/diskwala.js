@@ -29,6 +29,70 @@ export function downloadHeaders() {
   return { 'User-Agent': UA, Accept: '*/*' };
 }
 
+function findPublicUrl(value, depth = 0) {
+  if (depth > 8 || value == null) return '';
+  if (typeof value === 'string') {
+    const v = value.replaceAll('\\u0026', '&');
+    if (/^https?:\/\//i.test(v) && !/diskwala\.com\/app\//i.test(v) &&
+        !/\.(?:png|jpe?g|svg|css|js|ico)(?:\?|$)/i.test(v)) return v;
+    return '';
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) { const hit = findPublicUrl(item, depth + 1); if (hit) return hit; }
+    return '';
+  }
+  if (typeof value === 'object') {
+    const preferred = ['downloadUrl','download_url','streamUrl','stream_url','url','file','path','link'];
+    for (const key of preferred) {
+      if (key in value) { const hit = findPublicUrl(value[key], depth + 1); if (hit) return hit; }
+    }
+    for (const item of Object.values(value)) { const hit = findPublicUrl(item, depth + 1); if (hit) return hit; }
+  }
+  return '';
+}
+
+async function callPublicDiskwala(shareUrl, timeoutMs) {
+  const id = /\/(?:app|file|e)\/([a-zA-Z0-9]+)/.exec(shareUrl)?.[1];
+  if (!id) throw new Error('invalid DiskWala share URL');
+  const headers = { 'User-Agent': UA, Accept: 'application/json,text/html,*/*', Referer: shareUrl };
+
+  // Public endpoints used by several open-source DiskWala clients. No user
+  // session, Telegram session, API key, or private credential is sent.
+  for (const endpoint of [
+    `https://www.diskwala.com/api/file/${id}`,
+    `https://www.diskwala.com/api/stream/${id}`,
+  ]) {
+    try {
+      const resp = await fetch(endpoint, { headers, redirect: 'follow', signal: AbortSignal.timeout(timeoutMs) });
+      if (!resp.ok) continue;
+      const data = await resp.json();
+      const normalized = normalize(data, shareUrl);
+      if (normalized) return normalized;
+      const hit = findPublicUrl(data);
+      if (hit) return normalize({ fileInfo: { name: data?.name || 'diskwala.mp4', url: hit } }, shareUrl);
+    } catch {}
+  }
+
+  // Next.js pages may expose public file metadata in __NEXT_DATA__.
+  const page = await fetch(shareUrl, {
+    headers: { 'User-Agent': UA, Accept: 'text/html,*/*' },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (page.ok) {
+    const html = await page.text();
+    const m = /<script[^>]+id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i.exec(html);
+    if (m) {
+      try {
+        const data = JSON.parse(m[1]);
+        const hit = findPublicUrl(data);
+        if (hit) return normalize({ fileInfo: { name: 'diskwala.mp4', url: hit } }, shareUrl);
+      } catch {}
+    }
+  }
+  throw new Error('public DiskWala metadata did not expose a downloadable URL');
+}
+
 async function callApiKeyProxy(shareUrl, timeoutMs) {
   const proxyUrl = String(process.env.DISKWALA_PROXY_URL || '').trim();
   const apiKey = String(process.env.DISKWALA_API_KEY || '').trim();
@@ -225,6 +289,14 @@ async function callResolver(base, shareUrl, timeoutMs) {
 
 export async function resolveInfo(shareUrl, ctx) {
   const failures = [];
+
+  // First try the public share flow. It needs no Telegram user session and
+  // never exposes an API key to an unknown third-party service.
+  try {
+    return await callPublicDiskwala(shareUrl, ctx.timeoutMs);
+  } catch (err) {
+    failures.push(`public flow: ${err.message}`);
+  }
 
   // Preferred SESSION-free route: an API-key resolver supplied by the owner.
   // Secrets stay in deployment environment variables and are never committed.
