@@ -134,11 +134,7 @@ async function callBrowserResolver(shareUrl, timeoutMs) {
     return null;
   }
 
-  const executablePath =
-    process.env.CHROMIUM_PATH ||
-    ['/usr/bin/chromium-browser', '/usr/bin/chromium'].find((v) => {
-      try { return requireFsAccess(v); } catch { return false; }
-    });
+  const executablePath = process.env.CHROMIUM_PATH || '/usr/bin/chromium';
 
   const browser = await chromium.launch({
     headless: true,
@@ -199,15 +195,6 @@ async function callBrowserResolver(shareUrl, timeoutMs) {
     }, shareUrl);
   } finally {
     await browser.close().catch(() => {});
-  }
-}
-
-function requireFsAccess(path) {
-  try {
-    process.binding('fs').internalModuleStat(path);
-    return true;
-  } catch {
-    return false;
   }
 }
 
