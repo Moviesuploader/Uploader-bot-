@@ -97,12 +97,12 @@ async function callApiKeyProxy(shareUrl, timeoutMs) {
   const proxyUrl = String(
     process.env.DISKWALA_API_URL ||
     process.env.DISKWALA_PROXY_URL ||
-    'https://api.teraboxdl.site/api/v1/diskwala/extract'
+    'https://diskwaladevapi.in/api/v1/diskwala/extract'
   ).trim();
   const apiKey = String(process.env.DISKWALA_API_KEY || '').trim();
   if (!proxyUrl || !apiKey) return null;
 
-  const authMode = String(process.env.DISKWALA_API_AUTH || 'bearer').trim().toLowerCase();
+  const authMode = String(process.env.DISKWALA_API_AUTH || 'x-api-key').trim().toLowerCase();
   const authHeaders = authMode === 'x-api-key'
     ? { 'X-API-Key': apiKey }
     : { Authorization: `Bearer ${apiKey}` };
