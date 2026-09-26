@@ -4,8 +4,16 @@
   "description": "Telegram downloader bot for DiskWala, Terabox and YouTube.",
   "type": "module",
   "main": "bot.js",
-  "scripts": {"start":"node bot.js","dev":"node --watch bot.js","check":"node --check bot.js"},
-  "engines":{"node":">=18.17"},
-  "license":"MIT",
-  "dependencies":{}
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node --watch bot.js",
+    "check": "node --check bot.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "playwright-core": "^1.55.0"
+  }
 }
