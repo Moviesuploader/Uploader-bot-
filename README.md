@@ -1,45 +1,59 @@
 # Uploader Bot
 
-Private Telegram downloader/uploader bot built from the supplied working engine.
+Telegram downloader/uploader bot for **DiskWala, Terabox and YouTube**.
 
-## Supported
-- DiskWala share links
-- Terabox-family share links
-- YouTube metadata + existing quality/download resolver
-- Telegram video/audio/document delivery
+This repository keeps the supplied working provider/download engine instead of replacing it.
+
+## Features
+
+- DiskWala public share-link resolver
+- Terabox share-link resolver
+- YouTube quality buttons/download resolver
 - Download progress and speed
-- Thumbnail attachment
-- Direct-link fallback for files above the configured upload limit
+- Telegram video/audio/document delivery
+- Streaming flag for playable Telegram videos
+- File-size guard and direct-link fallback
+- Thumbnail support
 - Temporary-file cleanup
-- Owner/access control
-- In-memory callback cache
+- Private owner mode / `ALLOWED_USERS`
+- Heroku, Koyeb and Docker-ready
 
-## Deploy
-
-Node.js 18.17+ is supported. The repository includes both a `Procfile` and `Dockerfile`, so it can be deployed as a worker on Heroku or as a Docker service on platforms such as Koyeb.
-
-### Required environment
+## Required configuration
 
 ```env
-BOT_TOKEN=your_bot_token
-MAX_FILE_MB=48
+BOT_TOKEN=your_telegram_bot_token
 ```
 
-For Terabox, set `TERABOX_COOKIES` when the built-in resolver needs an authenticated share session. For the existing YouTube download provider, set its resolver configuration (`YTDL_API_KEY` and optionally `YTDL_API_BASE`) if you want download quality buttons to complete.
+For Terabox, configure `TERABOX_COOKIES` if the current share flow needs an account cookie.
+
+DiskWala uses the existing resolver from the base project and **does not require your DiskWala API key**. You can override its endpoint with `DISKWALA_RESOLVER_URL`.
+
+The existing YouTube provider uses `YTDL_API_BASE` + `YTDL_API_KEY` when a quality is selected.
 
 Optional:
 
 ```env
 ALLOWED_USERS=123456789
+MAX_FILE_MB=48
 REQUEST_TIMEOUT_MS=25000
 DOWNLOAD_DIR=./downloads
-DISKWALA_RESOLVER_URL=https://diskwala-dl-six.vercel.app/api/scrap
+TELEGRAM_API_ROOT=https://api.telegram.org
 ```
 
-If `ALLOWED_USERS` is empty, the first Telegram account that sends `/start` claims the bot.
+## Start
 
-## Security
+```bash
+node bot.js
+```
 
-Never commit `.env`, bot tokens, cookies, or API keys. The included `.gitignore` excludes local secrets and temporary downloads.
+Node.js 18.17+ is required.
 
-Use the bot only for files/content you are authorized to download.
+## Deploy
+
+**Heroku:** worker command is defined in `Procfile`.
+
+**Koyeb:** use `node bot.js` as the run command and add environment variables in the service settings.
+
+**Docker:** build with the included `Dockerfile`.
+
+> Use the bot only for files/content you are authorized to access and download.
