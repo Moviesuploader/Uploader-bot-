@@ -2,16 +2,60 @@
   "name": "Uploader Bot",
   "description": "Telegram downloader bot for DiskWala, Terabox and YouTube.",
   "repository": "https://github.com/Moviesuploader/Uploader-bot-",
-  "keywords": ["telegram", "terabox", "diskwala", "youtube", "bot", "nodejs"],
+  "keywords": [
+    "telegram",
+    "terabox",
+    "diskwala",
+    "youtube",
+    "bot",
+    "nodejs"
+  ],
   "stack": "heroku-24",
-  "buildpacks": [{"url":"heroku/nodejs"}],
+  "buildpacks": [
+    {
+      "url": "heroku/nodejs"
+    }
+  ],
   "env": {
-    "BOT_TOKEN": {"description":"Telegram bot token from @BotFather","required":true},
-    "TERABOX_COOKIES": {"description":"Terabox cookie(s), comma-separated. Needed for the built-in Terabox resolver.","required":false},
-    "YTDL_API_KEY": {"description":"Optional key for the existing YouTube download resolver.","required":false},
-    "MAX_FILE_MB": {"description":"Maximum file size in MB staged and uploaded by the bot.","value":"48","required":false},
-    "REQUEST_TIMEOUT_MS": {"description":"Resolver timeout in milliseconds.","value":"25000","required":false},
-    "ALLOWED_USERS": {"description":"Optional comma-separated Telegram user/chat IDs. If empty, first /start claims the bot.","required":false}
+    "BOT_TOKEN": {
+      "description": "Telegram bot token from @BotFather",
+      "required": true
+    },
+    "TERABOX_COOKIES": {
+      "description": "Terabox cookie(s), comma-separated. Needed for the built-in Terabox resolver.",
+      "required": false
+    },
+    "YTDL_API_KEY": {
+      "description": "Optional key for the existing YouTube download resolver.",
+      "required": false
+    },
+    "MAX_FILE_MB": {
+      "description": "Maximum file size in MB staged and uploaded by the bot.",
+      "value": "48",
+      "required": false
+    },
+    "REQUEST_TIMEOUT_MS": {
+      "description": "Resolver timeout in milliseconds.",
+      "value": "25000",
+      "required": false
+    },
+    "ALLOWED_USERS": {
+      "description": "Optional comma-separated Telegram user/chat IDs. If empty, first /start claims the bot.",
+      "required": false
+    },
+    "DISKWALA_PROXY_URL": {
+      "description": "Optional SESSION-free DiskWala resolver endpoint (POST JSON URL).",
+      "required": false
+    },
+    "DISKWALA_API_KEY": {
+      "description": "API key for DISKWALA_PROXY_URL. Store as a deployment secret.",
+      "required": false
+    }
   },
-  "formation":{"worker":{"quantity":1,"size":"eco"}}
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "eco"
+    }
+  }
 }
