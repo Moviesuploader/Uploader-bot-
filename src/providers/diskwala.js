@@ -94,9 +94,14 @@ async function callPublicDiskwala(shareUrl, timeoutMs) {
 }
 
 async function callApiKeyProxy(shareUrl, timeoutMs) {
-  const proxyUrl = String(process.env.DISKWALA_PROXY_URL || '').trim();
+  const proxyUrl = String(process.env.DISKWALA_API_URL || process.env.DISKWALA_PROXY_URL || '').trim();
   const apiKey = String(process.env.DISKWALA_API_KEY || '').trim();
   if (!proxyUrl || !apiKey) return null;
+
+  const authMode = String(process.env.DISKWALA_API_AUTH || 'bearer').trim().toLowerCase();
+  const authHeaders = authMode === 'x-api-key'
+    ? { 'X-API-Key': apiKey }
+    : { Authorization: `Bearer ${apiKey}` };
 
   const resp = await fetch(proxyUrl, {
     method: 'POST',
@@ -104,13 +109,13 @@ async function callApiKeyProxy(shareUrl, timeoutMs) {
       'User-Agent': UA,
       Accept: 'application/json',
       'Content-Type': 'application/json',
-      'x-api-key': apiKey,
+      ...authHeaders,
     },
     body: JSON.stringify({ url: shareUrl }),
     signal: AbortSignal.timeout(Math.max(timeoutMs, 60_000)),
   });
   const raw = await resp.text();
-  if (!resp.ok) throw new Error(`API-key resolver HTTP ${resp.status}${raw ? `: ${raw.slice(0, 120)}` : ''}`);
+  if (!resp.ok) throw new Error(`API resolver HTTP ${resp.status}${raw ? `: ${raw.slice(0, 180)}` : ''}`);
 
   let data;
   try { data = JSON.parse(raw); }
@@ -300,7 +305,7 @@ export async function resolveInfo(shareUrl, ctx) {
 
   // Preferred SESSION-free route: an API-key resolver supplied by the owner.
   // Secrets stay in deployment environment variables and are never committed.
-  if (process.env.DISKWALA_PROXY_URL && process.env.DISKWALA_API_KEY) {
+  if ((process.env.DISKWALA_API_URL || process.env.DISKWALA_PROXY_URL) && process.env.DISKWALA_API_KEY) {
     try {
       const result = await callApiKeyProxy(shareUrl, ctx.timeoutMs);
       if (result) return result;
