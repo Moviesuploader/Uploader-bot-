@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -20,6 +21,21 @@ fs.mkdirSync(downloadDir, { recursive: true });
 
 const cache = new Cache();
 const maxBytes = config.maxFileMb * 1024 * 1024;
+
+// Hosting health endpoint. Koyeb/Render-style web services require a listening
+// port even though Telegram itself is handled through long polling.
+const healthPort = Number(process.env.PORT || 8000);
+const healthServer = http.createServer((req, res) => {
+  if (req.url === '/' || req.url === '/health' || req.url === '/api/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, service: 'uploader-bot', uptime: Math.round(process.uptime()) }));
+  }
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: false, error: 'not_found' }));
+});
+healthServer.listen(healthPort, '0.0.0.0', () => {
+  console.log(`Health server listening on 0.0.0.0:${healthPort}`);
+});
 
 // --- Access control (private bot) ---
 // Owner ids come from ALLOWED_USERS (comma-separated) and/or data/owner.json.
