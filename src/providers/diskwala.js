@@ -29,6 +29,34 @@ export function downloadHeaders() {
   return { 'User-Agent': UA, Accept: '*/*' };
 }
 
+async function callApiKeyProxy(shareUrl, timeoutMs) {
+  const proxyUrl = String(process.env.DISKWALA_PROXY_URL || '').trim();
+  const apiKey = String(process.env.DISKWALA_API_KEY || '').trim();
+  if (!proxyUrl || !apiKey) return null;
+
+  const resp = await fetch(proxyUrl, {
+    method: 'POST',
+    headers: {
+      'User-Agent': UA,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+    },
+    body: JSON.stringify({ url: shareUrl }),
+    signal: AbortSignal.timeout(Math.max(timeoutMs, 60_000)),
+  });
+  const raw = await resp.text();
+  if (!resp.ok) throw new Error(`API-key resolver HTTP ${resp.status}${raw ? `: ${raw.slice(0, 120)}` : ''}`);
+
+  let data;
+  try { data = JSON.parse(raw); }
+  catch { throw new Error('API-key resolver returned invalid JSON'); }
+
+  const normalized = normalize(data, shareUrl);
+  if (!normalized) throw new Error('API-key resolver returned no downloadable URL');
+  return normalized;
+}
+
 function normalize(data, shareUrl) {
   const file = data?.data?.file || data?.file || data?.fileInfo || data?.result?.file;
   const dlink =
@@ -93,6 +121,19 @@ async function callResolver(base, shareUrl, timeoutMs) {
 
 export async function resolveInfo(shareUrl, ctx) {
   const failures = [];
+
+  // Preferred SESSION-free route: an API-key resolver supplied by the owner.
+  // Secrets stay in deployment environment variables and are never committed.
+  if (process.env.DISKWALA_PROXY_URL && process.env.DISKWALA_API_KEY) {
+    try {
+      const result = await callApiKeyProxy(shareUrl, ctx.timeoutMs);
+      if (result) return result;
+    } catch (err) {
+      failures.push(`api-key resolver: ${err.message}`);
+      console.warn('[diskwala] API-key resolver failed; trying public fallback:', err.message);
+    }
+  }
+
   for (const resolver of resolverList()) {
     // One transient 5xx should not instantly fail a user request.
     for (let attempt = 1; attempt <= 2; attempt++) {
