@@ -97,12 +97,12 @@ async function callApiKeyProxy(shareUrl, timeoutMs) {
   const proxyUrl = String(
     process.env.DISKWALA_API_URL ||
     process.env.DISKWALA_PROXY_URL ||
-    'https://diskwaladevapi.in/api/v1/diskwala/extract'
+    'https://api.teraboxdl.site/api/v1/diskwala/extract'
   ).trim();
   const apiKey = String(process.env.DISKWALA_API_KEY || '').trim();
   if (!proxyUrl || !apiKey) return null;
 
-  const authMode = String(process.env.DISKWALA_API_AUTH || 'x-api-key').trim().toLowerCase();
+  const authMode = String(process.env.DISKWALA_API_AUTH || 'bearer').trim().toLowerCase();
   const authHeaders = authMode === 'x-api-key'
     ? { 'X-API-Key': apiKey }
     : { Authorization: `Bearer ${apiKey}` };
@@ -131,42 +131,20 @@ async function callApiKeyProxy(shareUrl, timeoutMs) {
 }
 
 function normalize(data, shareUrl) {
-  const file = data?.data?.file || data?.file || data?.fileInfo || data?.result?.file;
-  const dlink =
-    file?.downloadUrl || file?.download_url || file?.url ||
-    data?.downloadUrl || data?.download_url || data?.url;
-  if (!dlink || !/^https?:\/\//i.test(String(dlink))) return null;
-
-  const ext =
-    String(file?.extension || '').toLowerCase().replace(/[^a-z0-9]/g, '') ||
-    (() => {
-      try {
-        const m = /\.([a-z0-9]{2,5})$/i.exec(new URL(String(dlink)).pathname);
-        return m ? m[1].toLowerCase() : 'mp4';
-      } catch { return 'mp4'; }
-    })();
-  let fileName = String(file?.name || data?.title || 'diskwala').trim() || 'diskwala';
-  if (!fileName.toLowerCase().endsWith(`.${ext}`)) fileName = `${fileName}.${ext}`;
-  const size = Number(file?.size || file?.size_bytes || data?.size || 0) || 0;
-  return {
-    provider: name,
-    share_url: shareUrl,
-    final_url: shareUrl,
-    surl: '',
-    title: fileName,
-    files: [{
-      name: fileName,
-      size: formatSize(size),
-      size_bytes: size,
-      thumbnail: file?.thumb || file?.thumbnail || data?.thumbnail || '',
-      dlink: String(dlink),
-      is_dir: false,
-      path: '',
-      fs_id: '',
-    }],
-  };
+  const root = data?.data || data?.result || data;
+  const file = root?.file || root?.fileInfo || root?.media || root;
+  const dlink = file?.direct_link || file?.download_url || file?.downloadUrl || file?.direct_url || file?.url || root?.direct_link || root?.download_url || root?.downloadUrl || root?.direct_url || root?.url || '';
+  const hls = file?.hls_url || file?.hlsUrl || file?.stream_url || file?.streamUrl || root?.hls_url || root?.hlsUrl || root?.stream_url || root?.streamUrl || '';
+  if (!/^https?:\/\//i.test(String(dlink))) return null;
+  const rawName = file?.name || file?.filename || file?.file_name || root?.file_name || root?.filename || root?.title || 'diskwala';
+  let fileName = String(rawName).trim() || 'diskwala';
+  let ext = String(file?.extension || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!ext) { try { const pathname = decodeURIComponent(new URL(String(dlink)).pathname); ext = (/\.([a-z0-9]{2,5})$/i.exec(pathname) || [])[1]?.toLowerCase() || ''; } catch {} }
+  if (!ext) ext = 'mp4';
+  if (!fileName.toLowerCase().endsWith('.' + ext)) fileName += '.' + ext;
+  const size = Number(file?.size_bytes || file?.size || root?.size_bytes || root?.size || 0) || 0;
+  return { provider: name, share_url: shareUrl, final_url: shareUrl, surl: '', title: fileName, files: [{ name: fileName, size: formatSize(size), size_bytes: size, thumbnail: file?.thumbnail || file?.thumb || root?.thumbnail || root?.thumb || '', dlink: String(dlink), stream_url: /^https?:\/\//i.test(String(hls)) ? String(hls) : '', is_dir: false, path: '', fs_id: '' }] };
 }
-
 
 function findMediaUrl(value, depth = 0) {
   if (depth > 6 || value == null) return '';
@@ -299,16 +277,8 @@ async function callResolver(base, shareUrl, timeoutMs) {
 export async function resolveInfo(shareUrl, ctx) {
   const failures = [];
 
-  // First try the public share flow. It needs no Telegram user session and
-  // never exposes an API key to an unknown third-party service.
-  try {
-    return await callPublicDiskwala(shareUrl, ctx.timeoutMs);
-  } catch (err) {
-    failures.push(`public flow: ${err.message}`);
-  }
-
-  // Preferred SESSION-free route: an API-key resolver supplied by the owner.
-  // Secrets stay in deployment environment variables and are never committed.
+  // Primary route: managed Diskwala API -> direct CDN URL.
+  // API credentials remain server-side in environment variables.
   if (process.env.DISKWALA_API_KEY) {
     try {
       const result = await callApiKeyProxy(shareUrl, ctx.timeoutMs);
