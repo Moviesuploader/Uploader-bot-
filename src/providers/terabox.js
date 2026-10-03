@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { formatSize, findBetween } from '../utils.js';
 
 export const name = 'terabox';
@@ -107,6 +108,71 @@ function extractTokens(html) {
     (html.match(/bdstoken\\?"\s*:\s*\\?"([^"\\]+)/) || [])[1] ||
     '';
   return { jsToken, logid, bdstoken };
+}
+
+async function resolveWithOfficialApi(shareUrl, ctx) {
+  const apiKey = String(process.env.TERABOX_API_KEY || '').trim();
+  const apiSecret = String(process.env.TERABOX_API_SECRET || '').trim();
+  if (!apiKey || !apiSecret) return null;
+
+  const base = String(process.env.TERABOX_API_BASE || 'https://api.teraboxdl.site').replace(/\/$/, '');
+  const endpoint = '/v1/api';
+  const body = JSON.stringify({ url: shareUrl, dir_path: '', page: 1 });
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const signature = crypto
+    .createHmac('sha256', apiSecret)
+    .update(`POST${endpoint}${timestamp}${body}`)
+    .digest('hex');
+
+  const resp = await fetch(`${base}${endpoint}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-Key': apiKey,
+      'X-Timestamp': timestamp,
+      'X-Signature': signature,
+      'User-Agent': UA,
+    },
+    body,
+    signal: AbortSignal.timeout(Math.max(ctx.timeoutMs, 60_000)),
+  });
+
+  const raw = await resp.text();
+  if (!resp.ok) throw new Error(`TeraBox API HTTP ${resp.status}`);
+  let data;
+  try { data = JSON.parse(raw); } catch { throw new Error('TeraBox API returned invalid JSON'); }
+
+  if (data?.errno && Number(data.errno) !== 0) {
+    throw new Error(`TeraBox API error ${data.errno}${data.errmsg ? `: ${data.errmsg}` : ''}`);
+  }
+
+  const list = Array.isArray(data?.list) ? data.list : [];
+  const files = list.map((f) => {
+    const dlink = f.direct_link || f.download_url || f.dlink || '';
+    const stream = f.stream_url || f.m3u8 || '';
+    const size = Number(f.size || f.size_bytes || 0) || 0;
+    return {
+      name: f.server_filename || f.filename || f.name || 'file',
+      size: typeof f.formatted_size === 'string' ? f.formatted_size : formatSize(size),
+      size_bytes: size,
+      thumbnail: f.thumbs?.url3 || f.thumbs?.url2 || f.thumbs?.url1 || f.thumbnail || '',
+      dlink: String(dlink || stream),
+      stream_url: String(stream),
+      is_dir: Boolean(f.isdir || f.is_dir),
+      path: f.path || '',
+      fs_id: f.fs_id ? String(f.fs_id) : '',
+    };
+  }).filter((f) => /^https?:\/\//i.test(f.dlink));
+
+  if (!files.length) throw new Error('TeraBox API returned no downloadable files');
+  return {
+    provider: name,
+    share_url: shareUrl,
+    final_url: shareUrl,
+    surl: extractSurl(shareUrl) || '',
+    title: data.title || 'TeraBox Download',
+    files,
+  };
 }
 
 async function resolveWithCookie(shareUrl, cookie, ctx) {
@@ -236,7 +302,16 @@ async function resolveWithSamra(shareUrl, ctx) {
 }
 
 export async function resolveInfo(shareUrl, ctx) {
-  // Fast cookie-free API first; fall back to the original Terabox engine.
+  // Primary route when the managed TeraBox API credentials are configured.
+  if (process.env.TERABOX_API_KEY && process.env.TERABOX_API_SECRET) {
+    try {
+      return await resolveWithOfficialApi(shareUrl, ctx);
+    } catch (err) {
+      console.warn('[terabox] official API failed; trying fallback:', err.message);
+    }
+  }
+
+  // Cookie-free fallback API, then the original Terabox engine.
   if (String(process.env.TERABOX_SAMRA_API || '1') !== '0') {
     try {
       return await resolveWithSamra(shareUrl, ctx);
