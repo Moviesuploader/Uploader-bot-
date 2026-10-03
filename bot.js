@@ -3,6 +3,8 @@ import http from 'node:http';
 import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { config } from './src/config.js';
 import { cookiePool } from './src/cookies.js';
 import * as tg from './src/telegram.js';
@@ -19,6 +21,7 @@ if (!config.botToken) {
 const downloadDir = path.resolve(config.downloadDir);
 fs.mkdirSync(downloadDir, { recursive: true });
 
+const execFileAsync = promisify(execFile);
 const cache = new Cache();
 const maxBytes = config.maxFileMb * 1024 * 1024;
 
@@ -133,6 +136,45 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
   return tmp;
 }
 
+async function convertToTelegramVideo(inputPath, filename) {
+  const ext = extOf(filename);
+  if (ext === 'mp4') return { path: inputPath, filename };
+
+  const base = filename.replace(/\.[^.]+$/, '') || 'video';
+  const outputPath = path.join(
+    downloadDir,
+    `tg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.mp4`,
+  );
+
+  try {
+    await execFileAsync('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-y',
+      '-i', inputPath,
+      '-map', '0:v:0',
+      '-map', '0:a:0?',
+      '-c:v', 'libx264',
+      '-preset', process.env.FFMPEG_PRESET || 'veryfast',
+      '-crf', process.env.FFMPEG_CRF || '23',
+      '-c:a', 'aac',
+      '-b:a', process.env.FFMPEG_AUDIO_BITRATE || '128k',
+      '-movflags', '+faststart',
+      outputPath,
+    ], { timeout: Number(process.env.FFMPEG_TIMEOUT_MS || 30 * 60 * 1000) });
+  } catch (err) {
+    fs.unlink(outputPath, () => {});
+    throw new Error(`video conversion failed: ${err.message}`);
+  }
+
+  const stat = fs.statSync(outputPath);
+  if (stat.size > maxBytes) {
+    fs.unlink(outputPath, () => {});
+    const e = new Error('too_big');
+    e.tooBig = true;
+    throw e;
+  }
+  return { path: outputPath, filename: `${base}.mp4` };
+}
+
 async function handleMessage(msg) {
   const chatId = msg.chat && msg.chat.id;
   if (!chatId) return;
@@ -245,6 +287,18 @@ async function deliverFile(chatId, file, provider, status = null) {
     };
     tmp = await downloadToDisk(file.dlink, headers, extOf(fname), onProgress);
 
+    // Telegram's sendVideo expects a playable video container; normalize
+    // non-MP4 video sources to MP4 instead of silently sending them as files.
+    let uploadPath = tmp;
+    let uploadName = fname;
+    if (kind === 'video' && extOf(fname) !== 'mp4') {
+      const converted = await convertToTelegramVideo(tmp, fname);
+      uploadPath = converted.path;
+      uploadName = converted.filename;
+      fs.unlink(tmp, () => {});
+      tmp = uploadPath;
+    }
+
     // Attach the provider thumbnail to playable media when available.
     if (file.thumbnail && (kind === 'video' || kind === 'audio')) {
       try {
@@ -265,14 +319,14 @@ async function deliverFile(chatId, file, provider, status = null) {
       chatId,
       kind === 'video' ? 'upload_video' : kind === 'audio' ? 'upload_audio' : 'upload_document',
     );
-    const caption = `✅ <b>${esc(fname)}</b>\n💾 ${esc(file.size)}`;
+    const caption = `✅ <b>${esc(uploadName)}</b>\n💾 ${esc(file.size)}`;
     try {
-      await tg.sendFile({ chatId, filePath: tmp, filename: fname, caption, kind, thumbPath });
+      await tg.sendFile({ chatId, filePath: uploadPath, filename: uploadName, caption, kind: kind === 'video' ? 'video' : kind, thumbPath });
     } catch (e1) {
       if (kind === 'document') throw e1;
       // Telegram may reject some containers as video/audio — retry as a plain document.
       console.error(`${kind} upload failed (${e1.message}) — retrying as document`);
-      await tg.sendFile({ chatId, filePath: tmp, filename: fname, caption, kind: 'document' });
+      await tg.sendFile({ chatId, filePath: uploadPath, filename: uploadName, caption, kind: 'document' });
     }
     await tg.deleteMessage(chatId, statusId);
   } catch (err) {
