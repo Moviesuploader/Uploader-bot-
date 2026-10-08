@@ -42,6 +42,10 @@ export const config = {
   downloadMaxMb: Number(process.env.DOWNLOAD_MAX_MB || 0),
 
   downloadDir: process.env.DOWNLOAD_DIR || './downloads',
+  // Parallel range downloader settings. Sources without HTTP Range support
+  // automatically fall back to a single connection.
+  downloadConnections: Math.max(1, Math.min(Number(process.env.DOWNLOAD_CONNECTIONS || 8), 16)),
+  downloadChunkMb: Math.max(8, Number(process.env.DOWNLOAD_CHUNK_MB || 32)),
 
   // Resolver
   cookies: (process.env.TERABOX_COOKIES || process.env.TERABOX_COOKIE || '')
