@@ -480,7 +480,16 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
   // bursts of parallel range requests. A large 16-way burst can therefore turn
   // a perfectly valid download into HTTP 429. Start conservatively and fall
   // back to one stream when the host asks us to slow down.
-  const connections = Math.max(1, Math.min(Number(process.env.DOWNLOAD_CONNECTIONS || 4), 16));
+  const configuredConnections = Math.max(1, Math.min(Number(process.env.DOWNLOAD_CONNECTIONS || 4), 16));
+  let connections = configuredConnections;
+  try {
+    const host = new URL(dlink).hostname.toLowerCase();
+    // DragoXStream's download endpoint can return 429 when hit with a large
+    // range burst. Keep it at four connections even if a global value is higher.
+    if (host === 'dragoplayer.in' || host.endsWith('.dragoplayer.in')) {
+      connections = Math.min(configuredConnections, 4);
+    }
+  } catch {}
   const chunkBytes = Math.max(
     8 * 1024 * 1024,
     Number(process.env.DOWNLOAD_CHUNK_MB || 32) * 1024 * 1024,
