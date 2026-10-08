@@ -13,6 +13,8 @@ import { buildInfoPayload, esc } from './src/format.js';
 import { formatSize, fileEmoji } from './src/utils.js';
 import { Cache } from './src/cache.js';
 import * as mtproto from './src/mtproto.js';
+import * as adminConfig from './src/admin-config.js';
+import * as mongo from './src/mongo.js';
 
 if (!config.botToken) {
   console.error('BOT_TOKEN is missing — set it in .env and restart.');
@@ -42,178 +44,348 @@ healthServer.listen(healthPort, '0.0.0.0', () => {
   console.log(`Health server listening on 0.0.0.0:${healthPort}`);
 });
 
-// --- Access control (private bot) ---
-// Owner ids come from ALLOWED_USERS (comma-separated) and/or data/owner.json.
-// When neither exists, the first /start claims ownership (persisted to disk).
+// --- Owner/admin configuration ---
+// The panel is intentionally a single editable message: buttons never create
+// navigation clutter, and every credential/value message is deleted after capture.
 const ownerFile = path.resolve('data/owner.json');
-const ownerIds = new Set(
+const legacyOwnerIds = new Set(
   (process.env.ALLOWED_USERS || '').split(',').map((s) => s.trim()).filter(Boolean),
 );
+
 try {
-  for (const id of JSON.parse(fs.readFileSync(ownerFile, 'utf8'))) ownerIds.add(String(id));
+  for (const id of JSON.parse(fs.readFileSync(ownerFile, 'utf8'))) legacyOwnerIds.add(String(id));
 } catch {}
-function claimOwner(chatId) {
-  ownerIds.add(String(chatId));
-  fs.mkdirSync(path.dirname(ownerFile), { recursive: true });
-  fs.writeFileSync(ownerFile, JSON.stringify([...ownerIds]));
-  console.log(`[access] owner claimed: ${chatId}`);
+
+const configuredAdmin = adminConfig.getConfig();
+if (configuredAdmin.ownerId) legacyOwnerIds.add(configuredAdmin.ownerId);
+
+function currentOwnerId() {
+  return adminConfig.getConfig().ownerId || String(process.env.OWNER_ID || '').trim() || [...legacyOwnerIds][0] || '';
 }
-
-
-const mtprotoSetup = new Map();
 
 function isAdmin(chatId) {
-  return ownerIds.has(String(chatId));
+  const owner = currentOwnerId();
+  return owner ? String(chatId) === owner : legacyOwnerIds.has(String(chatId));
 }
 
-function mtprotoPanelText() {
-  const st = mtproto.status();
-  return `⚙️ <b>MTProto Admin Setup</b>\n\n🆔 API ID: <code>${st.apiId || 'Not set'}</code>\n🔐 API Hash: <code>${st.hasApiHash ? 'Configured' : 'Not set'}</code>\n📱 Session: <code>${st.hasSession ? 'Configured' : 'Not set'}</code>\n\nStatus: ${st.enabled ? '✅ Ready for large uploads' : '⚠️ Not configured'}\n\nSensitive values are never echoed back in chat.`;
+function claimOwner(chatId) {
+  const id = String(chatId);
+  adminConfig.save({ ownerId: id });
+  legacyOwnerIds.clear();
+  legacyOwnerIds.add(id);
+  fs.mkdirSync(path.dirname(ownerFile), { recursive: true });
+  fs.writeFileSync(ownerFile, JSON.stringify([id]));
+  console.log(`[access] owner claimed: ${id}`);
 }
 
-function mtprotoPanelMarkup() {
+const adminSetup = new Map();
+
+function adminPanelText(note = '') {
+  const a = adminConfig.getConfig();
+  const mt = mtproto.status();
+  const mg = mongo.status();
+  const owner = a.ownerId || currentOwnerId();
+
+  return `🛠️ <b>Uploader Bot — Admin Panel</b>\n\n` +
+    `👑 Owner ID: <code>${esc(owner || 'Not set')}</code>\n` +
+    `🍃 MongoDB: <b>${mg.configured ? (mg.connected ? 'Connected' : 'Configured') : 'Not set'}</b>\n` +
+    `📢 Logs Channel: <code>${esc(a.logsChannelId || 'Not set')}</code>\n\n` +
+    `📱 MTProto API ID: <code>${mt.apiId || 'Not set'}</code>\n` +
+    `🔐 API Hash: <b>${mt.hasApiHash ? 'Configured' : 'Not set'}</b>\n` +
+    `🪪 Session: <b>${mt.hasSession ? 'Configured' : 'Not set'}</b>\n` +
+    `📤 Large upload: <b>${mt.enabled ? 'Ready' : 'Not ready'}</b>` +
+    (note ? `\n\n<blockquote>${esc(note)}</blockquote>` : '');
+}
+
+function adminPanelMarkup() {
   return {
     inline_keyboard: [
       [
-        { text: '🆔 Set API ID', callback_data: 'mt:apiid' },
-        { text: '🔐 Set API Hash', callback_data: 'mt:apihash' },
+        { text: '👑 Owner ID', callback_data: 'adm:owner' },
+        { text: '🍃 Mongo URI', callback_data: 'adm:mongo' },
       ],
-      [{ text: '📱 Set Session', callback_data: 'mt:session' }],
       [
-        { text: '🧪 Test Connection', callback_data: 'mt:test' },
-        { text: '🗑 Clear Config', callback_data: 'mt:clear' },
+        { text: '📢 Logs Channel', callback_data: 'adm:logs' },
+        { text: '🧪 Test Mongo', callback_data: 'adm:testmongo' },
       ],
-      [{ text: '🔄 Refresh', callback_data: 'mt:refresh' }],
+      [
+        { text: '🆔 API ID', callback_data: 'adm:apiid' },
+        { text: '🔐 API Hash', callback_data: 'adm:apihash' },
+      ],
+      [
+        { text: '📱 Session', callback_data: 'adm:session' },
+        { text: '🧪 Test MTProto', callback_data: 'adm:testmt' },
+      ],
+      [
+        { text: '🗑 Clear Mongo', callback_data: 'adm:clearmongo' },
+        { text: '🗑 Clear Logs', callback_data: 'adm:clearlogs' },
+      ],
+      [
+        { text: '🔄 Refresh', callback_data: 'adm:refresh' },
+        { text: '✖️ Close', callback_data: 'adm:close' },
+      ],
     ],
   };
 }
 
-async function showMtprotoPanel(chatId, messageId = null) {
-  const text = mtprotoPanelText();
+async function showAdminPanel(chatId, messageId = null, note = '') {
+  const text = adminPanelText(note);
+  const extra = { reply_markup: adminPanelMarkup() };
   if (messageId) {
-    await tg.editMessageText(chatId, messageId, text, { reply_markup: mtprotoPanelMarkup() });
-  } else {
-    await tg.sendMessage(chatId, text, { reply_markup: mtprotoPanelMarkup() });
+    await tg.editMessageText(chatId, messageId, text, extra);
+    return messageId;
   }
+  const sent = await tg.sendMessage(chatId, text, extra);
+  return sent?.message_id || null;
 }
 
-async function handleMtprotoCallback(cq) {
+function startAdminInput(chatId, panelMessageId, step) {
+  adminSetup.set(String(chatId), { step, panelMessageId, values: {} });
+}
+
+async function handleAdminCallback(cq) {
   const chatId = cq.message?.chat?.id;
   if (!chatId || !isAdmin(chatId)) {
-    await tg.answerCallbackQuery(cq.id, '🔒 Admin only', true);
+    await tg.answerCallbackQuery(cq.id, '🔒 Owner only', true);
     return;
   }
 
-  const action = String(cq.data || '').split(':')[1] || '';
+  const data = String(cq.data || '');
+  const action = data.split(':')[1] || '';
+  const panelId = cq.message.message_id;
 
   if (action === 'refresh') {
     await tg.answerCallbackQuery(cq.id, 'Refreshed');
-    await showMtprotoPanel(chatId, cq.message.message_id);
+    await showAdminPanel(chatId, panelId);
     return;
   }
 
-  if (action === 'clear') {
-    mtproto.clearConfig();
-    await tg.answerCallbackQuery(cq.id, 'Config cleared');
-    await showMtprotoPanel(chatId, cq.message.message_id);
+  if (action === 'close') {
+    adminSetup.delete(String(chatId));
+    await tg.answerCallbackQuery(cq.id, 'Closed');
+    await tg.editMessageText(chatId, panelId, '✅ <b>Admin panel closed.</b>');
     return;
   }
 
-  if (action === 'test') {
-    await tg.answerCallbackQuery(cq.id, 'Testing MTProto…');
+  if (action === 'testmongo') {
+    await tg.answerCallbackQuery(cq.id, 'Testing MongoDB…');
     try {
-      const result = await mtproto.testConnection();
-      await tg.editMessageText(chatId, cq.message.message_id,
-        `🧪 <b>MTProto connection OK</b> ✅\n\n👤 Account: <code>@${esc(result.username || 'private')}</code>\n🆔 ID: <code>${esc(result.id)}</code>\n⭐ Premium: <b>${result.premium ? 'Yes' : 'No'}</b>`,
-        { reply_markup: mtprotoPanelMarkup() });
+      await mongo.testConnection();
+      await showAdminPanel(chatId, panelId, 'MongoDB connection is working ✅');
     } catch (err) {
-      await tg.editMessageText(chatId, cq.message.message_id,
-        `❌ <b>MTProto connection failed</b>\n<blockquote>${esc(err.message)}</blockquote>`,
-        { reply_markup: mtprotoPanelMarkup() });
+      await showAdminPanel(chatId, panelId, `MongoDB test failed: ${err.message}`);
     }
     return;
   }
 
-  const stepMap = { apiid: 'apiId', apihash: 'apiHash', session: 'session' };
-  const step = stepMap[action];
-  if (!step) return;
+  if (action === 'testmt') {
+    await tg.answerCallbackQuery(cq.id, 'Testing MTProto…');
+    try {
+      const result = await mtproto.testConnection();
+      await showAdminPanel(
+        chatId,
+        panelId,
+        `MTProto OK • @${result.username || 'private'} • Premium: ${result.premium ? 'Yes' : 'No'}`,
+      );
+    } catch (err) {
+      await showAdminPanel(chatId, panelId, `MTProto test failed: ${err.message}`);
+    }
+    return;
+  }
 
-  mtprotoSetup.set(String(chatId), { step, values: {} });
-  const prompts = {
-    apiId: '🆔 <b>Send API ID</b>\n\nOnly the numeric API ID.\n/cancel to abort.',
-    apiHash: '🔐 <b>Send API Hash</b>\n\nIt will not be echoed back.\n/cancel to abort.',
-    session: '📱 <b>Send Session String</b>\n\nIt will not be echoed back.\n/cancel to abort.',
+  if (action === 'clearmongo') {
+    adminConfig.clear('mongoUri');
+    await mongo.close();
+    await tg.answerCallbackQuery(cq.id, 'Mongo URI cleared');
+    await showAdminPanel(chatId, panelId);
+    return;
+  }
+
+  if (action === 'clearlogs') {
+    adminConfig.clear('logsChannelId');
+    await tg.answerCallbackQuery(cq.id, 'Logs channel cleared');
+    await showAdminPanel(chatId, panelId);
+    return;
+  }
+
+  const steps = {
+    owner: {
+      prompt: '👑 <b>Send the new Owner ID</b>\n\nOnly the numeric Telegram user ID.\n/cancel to return.',
+      next: 'owner',
+    },
+    mongo: {
+      prompt: '🍃 <b>Send MongoDB URI</b>\n\nIt will be saved securely and never echoed back.\n/cancel to return.',
+      next: 'mongo',
+    },
+    logs: {
+      prompt: '📢 <b>Send Logs Channel ID</b>\n\nExample: <code>-1001234567890</code>\nMake sure the bot is allowed to post there.\n/cancel to return.',
+      next: 'logs',
+    },
+    apiid: {
+      prompt: '🆔 <b>Send MTProto API ID</b>\n\nOnly the numeric API ID.\n/cancel to return.',
+      next: 'apiId',
+    },
+    apihash: {
+      prompt: '🔐 <b>Send MTProto API Hash</b>\n\nThe message will be deleted immediately after capture.\n/cancel to return.',
+      next: 'apiHash',
+    },
+    session: {
+      prompt: '📱 <b>Send MTProto Session String</b>\n\nThe message will be deleted immediately after capture.\n/cancel to return.',
+      next: 'session',
+    },
   };
+
+  const item = steps[action];
+  if (!item) return;
+
   await tg.answerCallbackQuery(cq.id);
-  await tg.sendMessage(chatId, prompts[step]);
+  startAdminInput(chatId, panelId, item.next);
+
+  if (action === 'apiid' || action === 'apihash' || action === 'session') {
+    const existing = mtproto.getConfig();
+    adminSetup.get(String(chatId)).values = { ...existing };
+  }
+
+  await tg.editMessageText(chatId, panelId, item.prompt, {
+    reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'adm:cancel' }]] },
+  });
 }
 
-async function handleMtprotoSetupMessage(msg) {
+async function handleAdminInput(msg) {
   const chatId = msg.chat?.id;
   if (!chatId || !isAdmin(chatId)) return false;
 
-  const state = mtprotoSetup.get(String(chatId));
+  const state = adminSetup.get(String(chatId));
   if (!state) return false;
 
   const text = String(msg.text || '').trim();
   if (!text) return true;
 
-  // API hash/session are secrets. Remove the admin's input message immediately
-  // after reading it so it does not remain visible in the Telegram chat.
-  const deleteSecretMessage = () => tg.deleteMessage(chatId, msg.message_id);
+  // Delete the admin's value message immediately. Telegram supports bots deleting
+  // incoming private-chat messages; failures are safely ignored by telegram.js.
+  await tg.deleteMessage(chatId, msg.message_id);
 
   if (text === '/cancel') {
-    mtprotoSetup.delete(String(chatId));
-    await tg.sendMessage(chatId, '❌ MTProto setup cancelled.');
+    adminSetup.delete(String(chatId));
+    await showAdminPanel(chatId, state.panelMessageId);
     return true;
   }
 
-  if (state.step === 'apiId') {
-    if (!/^\d+$/.test(text) || Number(text) <= 0) {
-      await tg.sendMessage(chatId, '❌ API ID must be a positive number. Try again or /cancel.');
-      return true;
-    }
-    state.values.apiId = Number(text);
-    await deleteSecretMessage();
-    state.step = 'apiHash';
-    await tg.sendMessage(chatId, '🔐 <b>Now send the API Hash.</b>\n\nIt will not be echoed back.');
-    return true;
-  }
+  const finish = async (note = '') => {
+    adminSetup.delete(String(chatId));
+    await showAdminPanel(chatId, state.panelMessageId, note);
+  };
 
-  if (state.step === 'apiHash') {
-    if (text.length < 10) {
-      await tg.sendMessage(chatId, '❌ API Hash looks too short. Try again or /cancel.');
-      return true;
-    }
-    state.values.apiHash = text;
-    await deleteSecretMessage();
-    state.step = 'session';
-    await tg.sendMessage(chatId, '📱 <b>Now send the Session String.</b>\n\nIt will not be echoed back.');
-    return true;
-  }
-
-  if (state.step === 'session') {
-    if (text.length < 20) {
-      await tg.sendMessage(chatId, '❌ Session String looks too short. Try again or /cancel.');
+  try {
+    if (state.step === 'owner') {
+      if (!/^\d+$/.test(text) || Number(text) <= 0) {
+        await showAdminPanel(chatId, state.panelMessageId, 'Owner ID must be a positive numeric Telegram user ID.');
+        return true;
+      }
+      adminConfig.save({ ownerId: text });
+      legacyOwnerIds.clear();
+      legacyOwnerIds.add(text);
+      fs.mkdirSync(path.dirname(ownerFile), { recursive: true });
+      fs.writeFileSync(ownerFile, JSON.stringify([text]));
+      await finish('Owner ID saved. Admin access is now assigned to the new owner.');
       return true;
     }
 
-    try {
-      await deleteSecretMessage();
-      mtproto.saveConfig({ apiId: state.values.apiId, apiHash: state.values.apiHash, session: text });
-      mtprotoSetup.delete(String(chatId));
-      await tg.sendMessage(chatId, '💾 <b>MTProto config saved.</b>\n\n🧪 Testing connection now…');
-      const result = await mtproto.testConnection();
-      await tg.sendMessage(chatId,
-        `✅ <b>MTProto is ready!</b>\n\n👤 Account: <code>@${esc(result.username || 'private')}</code>\n🆔 ID: <code>${esc(result.id)}</code>\n⭐ Premium: <b>${result.premium ? 'Yes' : 'No'}</b>\n\nLarge TeraBox uploads can now use this session.`);
-    } catch (err) {
-      await tg.sendMessage(chatId,
-        `⚠️ <b>Config saved, but connection test failed.</b>\n<blockquote>${esc(err.message)}</blockquote>\n\nOpen /mtproto to retry.`);
+    if (state.step === 'mongo') {
+      if (!/^(mongodb(?:\+srv)?:\/\/)/i.test(text)) {
+        await showAdminPanel(chatId, state.panelMessageId, 'That does not look like a MongoDB URI.');
+        return true;
+      }
+      adminConfig.save({ mongoUri: text });
+      await mongo.close();
+      await mongo.testConnection();
+      await finish('MongoDB URI saved and connection verified ✅');
+      return true;
     }
-    return true;
-  }
 
+    if (state.step === 'logs') {
+      if (!/^-?\d+$/.test(text) && !/^@?[A-Za-z0-9_]{4,}$/.test(text)) {
+        await showAdminPanel(chatId, state.panelMessageId, 'Enter a valid channel/chat ID such as -1001234567890 or a channel username.');
+        return true;
+      }
+      adminConfig.save({ logsChannelId: text });
+      await finish('Logs channel saved. New download activity will be sent there 📢');
+      return true;
+    }
+
+    if (state.step === 'apiId') {
+      if (!/^\d+$/.test(text) || Number(text) <= 0) {
+        await showAdminPanel(chatId, state.panelMessageId, 'API ID must be a positive number.');
+        return true;
+      }
+      state.values.apiId = Number(text);
+    } else if (state.step === 'apiHash') {
+      if (text.length < 10) {
+        await showAdminPanel(chatId, state.panelMessageId, 'API Hash looks too short.');
+        return true;
+      }
+      state.values.apiHash = text;
+    } else if (state.step === 'session') {
+      if (text.length < 20) {
+        await showAdminPanel(chatId, state.panelMessageId, 'Session String looks too short.');
+        return true;
+      }
+      state.values.session = text;
+    } else {
+      await finish('Unknown setup step.');
+      return true;
+    }
+
+    const mtState = state.step === 'apiId' ? 'apiHash' : state.step === 'apiHash' ? 'session' : null;
+    if (mtState) {
+      const prompt = mtState === 'apiHash'
+        ? '🔐 <b>Now send the MTProto API Hash</b>\n\nYour message will be deleted immediately.'
+        : '📱 <b>Now send the MTProto Session String</b>\n\nYour message will be deleted immediately.';
+      state.step = mtState;
+      await tg.editMessageText(chatId, state.panelMessageId, prompt, {
+        reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'adm:cancel' }]] },
+      });
+      return true;
+    }
+
+    mtproto.saveConfig(state.values);
+    const result = await mtproto.testConnection();
+    await finish(`MTProto saved and verified ✅ • @${result.username || 'private'} • Premium: ${result.premium ? 'Yes' : 'No'}`);
+  } catch (err) {
+    await showAdminPanel(chatId, state.panelMessageId, `Save/test failed: ${err.message}`);
+  }
   return true;
+}
+
+async function sendDownloadLog({ chatId, actor, provider, sourceUrl, file, status, uploadMethod = '', error = '' }) {
+  const a = adminConfig.getConfig();
+  const actorName = actor?.username ? `@${actor.username}` : actor?.first_name || String(actor?.id || chatId);
+  const payload = {
+    chatId: String(chatId),
+    userId: actor?.id ? String(actor.id) : String(chatId),
+    username: actor?.username || '',
+    userName: actorName,
+    provider: provider?.name || provider?.constructor?.name || 'unknown',
+    sourceUrl: sourceUrl || '',
+    fileName: file?.name || '',
+    size: file?.size || '',
+    sizeBytes: Number(file?.size_bytes || 0),
+    downloadUrl: file?.dlink || '',
+    status,
+    uploadMethod,
+    error: error || '',
+  };
+
+  await Promise.allSettled([
+    a.logsChannelId
+      ? tg.sendMessage(
+          a.logsChannelId,
+          `📥 <b>Download Log</b>\n\n👤 <b>User:</b> ${esc(actorName)} (<code>${esc(payload.userId)}</code>)\n🏷 <b>Provider:</b> <code>${esc(payload.provider)}</code>\n📄 <b>File:</b> <code>${esc(payload.fileName)}</code>\n💾 <b>Size:</b> <code>${esc(payload.size || 'Unknown')}</code>\n📊 <b>Status:</b> <b>${esc(status)}</b>${uploadMethod ? `\n📤 <b>Upload:</b> <code>${esc(uploadMethod)}</code>` : ''}${sourceUrl ? `\n🔗 <b>Source:</b> <pre>${esc(sourceUrl)}</pre>` : ''}${error ? `\n❌ <b>Error:</b> <pre>${esc(error)}</pre>` : ''}`,
+          { protect_content: true },
+        )
+      : Promise.resolve(),
+    mongo.status().configured ? mongo.logDownload(payload).catch(() => {}) : Promise.resolve(),
+  ]);
 }
 
 const VIDEO_EXT = new Set(['mp4', 'mkv', 'webm', 'mov', 'm4v', 'avi', 'mpg', 'mpeg']);
@@ -354,30 +526,27 @@ async function handleMessage(msg) {
   if (!chatId) return;
   const text = msg.text || msg.caption || '';
 
-  // Private bot: first /start claims ownership; everyone else is rejected.
-  if (!ownerIds.size) {
+  // Private bot: first /start claims ownership when no owner is configured.
+  if (!currentOwnerId()) {
     if (!text.startsWith('/start')) {
-      await tg.sendMessage(
-        chatId,
-        "🔒 <b>Private bot</b>\n\nIt isn't claimed yet — send /start to become its owner. 👑",
-      );
+      await tg.sendMessage(chatId, '🔒 <b>Private bot</b>\n\nSend /start to claim ownership. 👑');
       return;
     }
     claimOwner(chatId);
     await tg.sendMessage(
       chatId,
-      `✅ <b>Ownership claimed!</b> 👑\n\n<blockquote>Only your account can use this bot from now on.</blockquote>\n🆔 <code>${chatId}</code>`,
+      `✅ <b>Ownership claimed!</b> 👑\n\nOnly your account can use this bot.\n🆔 <code>${chatId}</code>`,
     );
-  } else if (!ownerIds.has(String(chatId))) {
+  } else if (!isAdmin(chatId)) {
     console.log(`[access] blocked unauthorized chat ${chatId}`);
     await tg.sendMessage(chatId, '🔒 <b>Private bot</b>\n<blockquote>Access denied.</blockquote>');
     return;
   }
 
-  if (await handleMtprotoSetupMessage(msg)) return;
+  if (await handleAdminInput(msg)) return;
 
   if (text.startsWith('/mtproto') || text.startsWith('/admin')) {
-    await showMtprotoPanel(chatId);
+    await showAdminPanel(chatId);
     return;
   }
 
@@ -433,7 +602,7 @@ async function handleMessage(msg) {
 
 // Download + upload pipeline shared by direct downloads and quality picks.
 // Reuses an existing status message when one is passed (quality flow).
-async function deliverFile(chatId, file, provider, status = null) {
+async function deliverFile(chatId, file, provider, status = null, sourceUrl = '', actor = null) {
   const statusMsg =
     status ||
     (await tg.sendMessage(
@@ -442,6 +611,8 @@ async function deliverFile(chatId, file, provider, status = null) {
     ));
   const statusId = statusMsg.message_id;
   let tmp = null;
+  let uploadMethod = '';
+  const downloadStartedAt = Date.now();
   let thumbPath = null;
   try {
     const fname = safeFileName(file.name, file.dlink);
@@ -505,6 +676,7 @@ async function deliverFile(chatId, file, provider, status = null) {
     const needsMtproto = actualSize > botApiMaxBytes;
 
     if (needsMtproto) {
+      uploadMethod = 'MTProto';
       if (!mtproto.isEnabled()) {
         throw new Error(
           `large upload requires MTProto session (file is ${formatSize(actualSize)}; Bot API limit is ${config.maxFileMb} MB)`,
@@ -535,6 +707,7 @@ async function deliverFile(chatId, file, provider, status = null) {
         },
       });
     } else {
+      uploadMethod = 'Bot API';
       await tg.sendChatAction(
         chatId,
         kind === 'video' ? 'upload_video' : kind === 'audio' ? 'upload_audio' : 'upload_document',
@@ -560,11 +733,30 @@ async function deliverFile(chatId, file, provider, status = null) {
         });
       }
     }
+    await sendDownloadLog({
+      chatId,
+      actor,
+      provider,
+      sourceUrl,
+      file,
+      status: 'SUCCESS',
+      uploadMethod,
+    });
     await tg.deleteMessage(chatId, statusId);
   } catch (err) {
     const reason = err.tooBig
       ? 'the file exceeded the configured download-size cap'
       : esc(err.message);
+    await sendDownloadLog({
+      chatId,
+      actor,
+      provider,
+      sourceUrl,
+      file,
+      status: 'FAILED',
+      uploadMethod,
+      error: err.message,
+    });
     await tg.editMessageText(
       chatId,
       statusId,
@@ -577,13 +769,25 @@ async function deliverFile(chatId, file, provider, status = null) {
 }
 
 async function handleCallback(cq) {
-  if (String(cq.data || '').startsWith('mt:')) {
-    await handleMtprotoCallback(cq);
+  if (String(cq.data || '').startsWith('adm:')) {
+    if (String(cq.data || '') === 'adm:cancel') {
+      const chatId = cq.message?.chat?.id;
+      if (chatId && isAdmin(chatId)) {
+        const state = adminSetup.get(String(chatId));
+        adminSetup.delete(String(chatId));
+        await tg.answerCallbackQuery(cq.id, 'Cancelled');
+        await showAdminPanel(chatId, state?.panelMessageId || cq.message.message_id);
+      } else {
+        await tg.answerCallbackQuery(cq.id, '🔒 Owner only', true);
+      }
+      return;
+    }
+    await handleAdminCallback(cq);
     return;
   }
 
   const chatId = cq.message && cq.message.chat && cq.message.chat.id;
-  if (ownerIds.size && !ownerIds.has(String(chatId))) {
+  if (currentOwnerId() && !isAdmin(chatId)) {
     await tg.answerCallbackQuery(cq.id, '🔒 Private bot', true);
     return;
   }
@@ -638,7 +842,7 @@ async function handleCallback(cq) {
       );
       return;
     }
-    await deliverFile(chatId, file, entry.provider, status);
+    await deliverFile(chatId, file, entry.provider, status, entry.result.share_url || '', cq.from);
     return;
   }
 
@@ -669,7 +873,7 @@ async function handleCallback(cq) {
     return;
   }
   await tg.answerCallbackQuery(cq.id, '⏬ Download started…');
-  await deliverFile(chatId, file, entry.provider);
+  await deliverFile(chatId, file, entry.provider, null, entry.result.share_url || '', cq.from);
 }
 
 async function main() {
