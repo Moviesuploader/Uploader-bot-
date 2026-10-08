@@ -476,24 +476,16 @@ function safeFileName(name, dlink) {
 // Download a dlink to a temp file, enforcing the size cap both from the
 // content-length header and while streaming.
 async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
-  // Some file hosts advertise byte-range support but aggressively rate-limit
-  // bursts of parallel range requests. A large 16-way burst can therefore turn
-  // a perfectly valid download into HTTP 429. Start conservatively and fall
-  // back to one stream when the host asks us to slow down.
+  // Adaptive range downloader: keep a few streams for speed, but when the
+  // source rate-limits, reduce concurrency and retry only the affected range.
   const configuredConnections = Math.max(1, Math.min(Number(process.env.DOWNLOAD_CONNECTIONS || 4), 16));
   let connections = configuredConnections;
   try {
     const host = new URL(dlink).hostname.toLowerCase();
-    // DragoXStream's download endpoint can return 429 when hit with a large
-    // range burst. Keep it at four connections even if a global value is higher.
-    if (host === 'dragoplayer.in' || host.endsWith('.dragoplayer.in')) {
-      connections = Math.min(configuredConnections, 4);
-    }
+    if (host === 'dragoplayer.in' || host.endsWith('.dragoplayer.in')) connections = Math.min(configuredConnections, 4);
   } catch {}
-  const chunkBytes = Math.max(
-    8 * 1024 * 1024,
-    Number(process.env.DOWNLOAD_CHUNK_MB || 32) * 1024 * 1024,
-  );
+
+  const chunkBytes = Math.max(8 * 1024 * 1024, Number(process.env.DOWNLOAD_CHUNK_MB || 16) * 1024 * 1024);
   const cleanHeaders = Object.fromEntries(
     Object.entries(headers || {}).filter(([k]) => String(k).toLowerCase() !== 'range'),
   );
@@ -508,24 +500,23 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
     const value = resp?.headers?.get?.('retry-after');
     if (!value) return 1500;
     const seconds = Number(value);
-    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(60_000, Math.max(1000, seconds * 1000));
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(30_000, Math.max(1000, seconds * 1000));
     const when = Date.parse(value);
-    if (Number.isFinite(when)) return Math.min(60_000, Math.max(1000, when - Date.now()));
+    if (Number.isFinite(when)) return Math.min(30_000, Math.max(1000, when - Date.now()));
     return 1500;
   };
-
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   const singleStream = async (knownLength = 0) => {
     let lastError = null;
-    for (let attempt = 1; attempt <= 4; attempt += 1) {
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
       try {
         const resp = await fetch(dlink, { headers: cleanHeaders, redirect: 'follow' });
         if (resp.status === 429) {
           const wait = retryAfterMs(resp);
           resp.body?.cancel().catch(() => {});
           lastError = new Error('download rate limited (HTTP 429)');
-          if (attempt < 4) {
+          if (attempt < 5) {
             console.warn('[download] source rate-limited; retrying after ' + Math.ceil(wait / 1000) + 's');
             await sleep(wait);
             continue;
@@ -535,7 +526,7 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
         if (resp.status >= 500 && resp.status <= 599) {
           resp.body?.cancel().catch(() => {});
           lastError = new Error('download failed (HTTP ' + resp.status + ')');
-          if (attempt < 4) {
+          if (attempt < 5) {
             await sleep(Math.min(10_000, 1000 * attempt));
             continue;
           }
@@ -582,7 +573,7 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
         return tmp;
       } catch (err) {
         lastError = err;
-        if (err?.tooBig || attempt >= 4) throw err;
+        if (err?.tooBig || attempt >= 5) throw err;
       }
     }
     throw lastError || new Error('download failed');
@@ -590,8 +581,6 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
 
   let probe = null;
   try {
-    // Probe once to discover the total size. If the probe itself is rate-limited,
-    // do not immediately fire more range requests; wait and use a normal stream.
     probe = await fetch(dlink, {
       headers: { ...cleanHeaders, Range: 'bytes=0-0' },
       redirect: 'follow',
@@ -600,9 +589,12 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
     if (probe.status === 429) {
       const wait = retryAfterMs(probe);
       probe.body?.cancel().catch(() => {});
-      console.warn('[download] range probe rate-limited; waiting ' + Math.ceil(wait / 1000) + 's and switching to single stream');
+      console.warn('[download] range probe rate-limited; waiting ' + Math.ceil(wait / 1000) + 's');
       await sleep(wait);
-      return singleStream();
+      probe = await fetch(dlink, {
+        headers: { ...cleanHeaders, Range: 'bytes=0-0' },
+        redirect: 'follow',
+      });
     }
 
     const rangeHeader = probe.headers.get('content-range') || '';
@@ -635,25 +627,46 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
 
     let received = 0;
     let nextRange = 0;
-    let rateLimitedWait = 0;
-    const abort = new AbortController();
+    let activeWorkers = Math.min(connections, ranges.length);
+    let cooldownUntil = 0;
+    let rateLimitHits = 0;
+
+    const waitForCooldown = async () => {
+      const wait = cooldownUntil - Date.now();
+      if (wait > 0) await sleep(wait);
+    };
 
     const downloadRange = async ([rangeStart, rangeEnd]) => {
-      for (let attempt = 1; attempt <= 3; attempt += 1) {
+      for (let attempt = 1; attempt <= 6; attempt += 1) {
+        await waitForCooldown();
         try {
           const resp = await fetch(dlink, {
             headers: { ...cleanHeaders, Range: 'bytes=' + rangeStart + '-' + rangeEnd },
             redirect: 'follow',
-            signal: abort.signal,
           });
 
           if (resp.status === 429) {
-            rateLimitedWait = Math.max(rateLimitedWait, retryAfterMs(resp));
+            const wait = retryAfterMs(resp);
+            cooldownUntil = Math.max(cooldownUntil, Date.now() + wait);
+            rateLimitHits += 1;
+            if (rateLimitHits >= 1 && activeWorkers > 2) activeWorkers = 2;
+            if (rateLimitHits >= 3 && activeWorkers > 1) activeWorkers = 1;
             resp.body?.cancel().catch(() => {});
-            abort.abort();
-            const e = new Error('range download rate limited (HTTP 429)');
-            e.rateLimited = true;
-            throw e;
+            console.warn(
+              '[download] range rate-limited; retrying after ' +
+              Math.ceil(wait / 1000) + 's with ' + activeWorkers + ' workers',
+            );
+            if (attempt < 6) continue;
+            throw new Error('range download rate limited (HTTP 429)');
+          }
+
+          if (resp.status >= 500 && resp.status <= 599) {
+            resp.body?.cancel().catch(() => {});
+            if (attempt < 6) {
+              await sleep(Math.min(8000, 750 * attempt));
+              continue;
+            }
+            throw new Error('range download failed (HTTP ' + resp.status + ')');
           }
 
           if (resp.status !== 206) {
@@ -693,10 +706,11 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
           if (written !== expected) {
             throw new Error('range incomplete (expected ' + expected + ', got ' + written + ')');
           }
+          rateLimitHits = Math.max(0, rateLimitHits - 1);
           return;
         } catch (err) {
-          if (err?.rateLimited || abort.signal.aborted) throw err;
-          if (attempt >= 3) throw err;
+          if (err?.rangeUnsupported) throw err;
+          if (attempt >= 6) throw err;
           await sleep(400 * attempt);
         }
       }
@@ -704,16 +718,11 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
 
     const workers = Array.from(
       { length: Math.min(connections, ranges.length) },
-      async () => {
-        while (!abort.signal.aborted) {
+      async (_, workerIndex) => {
+        while (workerIndex < activeWorkers) {
           const index = nextRange++;
           if (index >= ranges.length) return;
-          try {
-            await downloadRange(ranges[index]);
-          } catch (err) {
-            abort.abort();
-            throw err;
-          }
+          await downloadRange(ranges[index]);
         }
       },
     );
@@ -722,12 +731,7 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
       await Promise.all(workers);
     } catch (err) {
       fs.unlink(tmp, () => {});
-      if (rateLimitedWait > 0) {
-        console.warn('[download] range requests were rate-limited; retrying as a single stream');
-        await sleep(rateLimitedWait);
-        return singleStream(total);
-      }
-      if (err.rangeUnsupported) return singleStream(total);
+      if (err?.rangeUnsupported) return singleStream(total);
       throw err;
     }
 
@@ -737,7 +741,10 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
       throw new Error('parallel download size mismatch (expected ' + total + ', got ' + stat.size + ')');
     }
 
-    console.log('[download] parallel: ' + ranges.length + ' ranges / ' + Math.min(connections, ranges.length) + ' connections');
+    console.log(
+      '[download] parallel: ' + ranges.length +
+      ' ranges / adaptive max ' + Math.min(connections, ranges.length) + ' connections',
+    );
     return tmp;
   } catch (err) {
     probe?.body?.cancel().catch(() => {});
@@ -1020,36 +1027,12 @@ async function deliverFile(chatId, file, provider, status = null, sourceUrl = ''
         await tg.copyMessage(chatId, dumpChannelId, dumped.message_id);
       }
     } else if (needsMtproto) {
-      stage = 'mtproto-upload';
-      uploadMethod = 'MTProto';
-      if (!mtproto.isEnabled()) {
-        throw new Error(
-          `large upload requires MTProto session (file is ${formatSize(actualSize)}; Bot API limit is ${config.maxFileMb} MB)`,
-        );
-      }
-      let uploadLastEdit = 0;
-      const uploadStartedAt = Date.now();
-      await mtproto.sendLargeFile({
-        chatId,
-        filePath: uploadPath,
-        caption,
-        onProgress: (uploaded, total) => {
-          const now = Date.now();
-          if (now - uploadLastEdit < 4000) return;
-          uploadLastEdit = now;
-          const pct = total ? Math.floor((uploaded / total) * 100) : null;
-          const bar = pct == null
-            ? ''
-            : `${'▰'.repeat(Math.floor(pct / 10))}${'▱'.repeat(10 - Math.floor(pct / 10))} ${pct}%`;
-          const secs = Math.max(1, (now - uploadStartedAt) / 1000);
-          const speed = `${formatSize(Math.round(uploaded / secs))}/s`;
-          tg.editMessageText(
-            chatId,
-            statusId,
-            `📤 <b>Uploading via MTProto…</b>\n${fileEmoji(uploadName)} <b>${esc(uploadName)}</b>\n💾 <code>${esc(formatSize(uploaded))}${total ? ` / ${esc(formatSize(total))}` : ''}</code>  ⚡ <code>${esc(speed)}</code>${bar ? `\n${bar}` : ''}`,
-          );
-        },
-      });
+      // A user MTProto session cannot deliver a large file as the bot.
+      // Sending to the same user account lands in Saved Messages.
+      // Large bot-PM delivery therefore requires Dump Channel -> Bot API copy.
+      throw new Error(
+        'large bot-PM delivery requires a configured Dump Channel; configure /admin → 📦 Dump Channel',
+      );
     } else {
       stage = 'bot-api-upload';
       uploadMethod = 'Bot API';
