@@ -68,3 +68,32 @@ export async function close() {
   clientPromise = null;
   activeUri = '';
 }
+
+
+export async function getMtprotoConfig() {
+  const client = await getClient();
+  const doc = await client
+    .db('uploader_bot')
+    .collection('settings')
+    .findOne({ _id: 'mtproto' });
+  return doc?.config && typeof doc.config === 'object' ? doc.config : null;
+}
+
+export async function saveMtprotoConfig(config) {
+  const client = await getClient();
+  await client
+    .db('uploader_bot')
+    .collection('settings')
+    .updateOne(
+      { _id: 'mtproto' },
+      { $set: { config, updatedAt: new Date() } },
+      { upsert: true },
+    );
+  return true;
+}
+
+export async function clearMtprotoConfig() {
+  const client = await getClient();
+  await client.db('uploader_bot').collection('settings').deleteOne({ _id: 'mtproto' });
+  return true;
+}
