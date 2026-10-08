@@ -28,6 +28,7 @@ export function getConfig() {
     ownerId: String(saved.ownerId || env('OWNER_ID') || '').trim(),
     mongoUri: String(saved.mongoUri || env('MONGO_URI') || env('MONGODB_URI') || '').trim(),
     logsChannelId: String(saved.logsChannelId || env('LOGS_CHANNEL_ID') || '').trim(),
+    dumpChannelId: String(saved.dumpChannelId || env('DUMP_CHANNEL_ID') || '').trim(),
   };
 }
 
@@ -37,6 +38,7 @@ export function save(patch = {}) {
     ownerId: patch.ownerId !== undefined ? String(patch.ownerId || '').trim() : current.ownerId,
     mongoUri: patch.mongoUri !== undefined ? String(patch.mongoUri || '').trim() : current.mongoUri,
     logsChannelId: patch.logsChannelId !== undefined ? String(patch.logsChannelId || '').trim() : current.logsChannelId,
+    dumpChannelId: patch.dumpChannelId !== undefined ? String(patch.dumpChannelId || '').trim() : current.dumpChannelId,
   };
   writeStore(next);
   return next;
@@ -47,6 +49,7 @@ export function clear(key) {
   if (key === 'ownerId') current.ownerId = '';
   if (key === 'mongoUri') current.mongoUri = '';
   if (key === 'logsChannelId') current.logsChannelId = '';
+  if (key === 'dumpChannelId') current.dumpChannelId = '';
   writeStore(current);
   return current;
 }
