@@ -59,6 +59,14 @@ export const answerCallbackQuery = (id, text = '', showAlert = false) =>
 export const sendChatAction = (chatId, action) =>
   call('sendChatAction', { chat_id: chatId, action }).catch(() => null);
 
+export const copyMessage = (chatId, fromChatId, messageId, extra = {}) =>
+  call('copyMessage', {
+    chat_id: chatId,
+    from_chat_id: fromChatId,
+    message_id: messageId,
+    ...extra,
+  });
+
 const MIME_BY_EXT = {
   mp4: 'video/mp4', mkv: 'video/x-matroska', webm: 'video/webm', mov: 'video/quicktime',
   m4v: 'video/x-m4v', avi: 'video/x-msvideo', mpg: 'video/mpeg', mpeg: 'video/mpeg',
