@@ -476,49 +476,179 @@ function safeFileName(name, dlink) {
 // Download a dlink to a temp file, enforcing the size cap both from the
 // content-length header and while streaming.
 async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
-  const resp = await fetch(dlink, { headers, redirect: 'follow' });
-  if (!resp.ok && resp.status !== 206) {
-    resp.body?.cancel().catch(() => {});
-    throw new Error(`download failed (HTTP ${resp.status})`);
-  }
-  const len = Number(resp.headers.get('content-length') || 0);
-  if (len > downloadMaxBytes) {
-    resp.body?.cancel().catch(() => {});
-    const e = new Error('too_big');
-    e.tooBig = true;
-    throw e;
-  }
+  const connections = Math.max(1, Math.min(Number(process.env.DOWNLOAD_CONNECTIONS || 16), 32));
+  const chunkBytes = Math.max(
+    8 * 1024 * 1024,
+    Number(process.env.DOWNLOAD_CHUNK_MB || 32) * 1024 * 1024,
+  );
+  const cleanHeaders = Object.fromEntries(
+    Object.entries(headers || {}).filter(([k]) => String(k).toLowerCase() !== 'range'),
+  );
+  cleanHeaders['Accept-Encoding'] = 'identity';
+
   const tmp = path.join(
     downloadDir,
     `dl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext ? `.${ext}` : ''}`,
   );
-  let received = 0;
-  const guard = new Transform({
-    transform(chunk, enc, cb) {
-      received += chunk.length;
-      if (onProgress) {
-        try {
-          onProgress(received, len);
-        } catch {}
-      }
-      if (received > downloadMaxBytes) {
-        const e = new Error('too_big');
-        e.tooBig = true;
-        cb(e);
-        return;
-      }
-      cb(null, chunk);
-    },
-  });
+
+  const singleStream = async (knownLength = 0) => {
+    const resp = await fetch(dlink, { headers: cleanHeaders, redirect: 'follow' });
+    if (!resp.ok && resp.status !== 206) {
+      resp.body?.cancel().catch(() => {});
+      throw new Error(`download failed (HTTP ${resp.status})`);
+    }
+    const len = knownLength || Number(resp.headers.get('content-length') || 0);
+    if (len > downloadMaxBytes) {
+      resp.body?.cancel().catch(() => {});
+      const e = new Error('too_big');
+      e.tooBig = true;
+      throw e;
+    }
+    let received = 0;
+    const guard = new Transform({
+      transform(chunk, enc, cb) {
+        received += chunk.length;
+        try { onProgress?.(received, len); } catch {}
+        if (received > downloadMaxBytes) {
+          const e = new Error('too_big');
+          e.tooBig = true;
+          cb(e);
+          return;
+        }
+        cb(null, chunk);
+      },
+    });
+    try {
+      await pipeline(
+        Readable.fromWeb(resp.body),
+        guard,
+        fs.createWriteStream(tmp, { highWaterMark: 4 * 1024 * 1024 }),
+      );
+    } catch (err) {
+      fs.unlink(tmp, () => {});
+      throw err;
+    }
+    return tmp;
+  };
+
+  let probe = null;
   try {
-    await pipeline(Readable.fromWeb(resp.body), guard, fs.createWriteStream(tmp, { highWaterMark: 4 * 1024 * 1024 }));
+    probe = await fetch(dlink, {
+      headers: { ...cleanHeaders, Range: 'bytes=0-0' },
+      redirect: 'follow',
+    });
+    const rangeHeader = probe.headers.get('content-range') || '';
+    const match = /^bytes\s+0-0\/(\d+)$/.exec(rangeHeader);
+    const total = match ? Number(match[1]) : 0;
+
+    if (probe.status !== 206 || !total) {
+      probe.body?.cancel().catch(() => {});
+      return singleStream();
+    }
+    if (total > downloadMaxBytes) {
+      probe.body?.cancel().catch(() => {});
+      const e = new Error('too_big');
+      e.tooBig = true;
+      throw e;
+    }
+    if (connections === 1 || total <= chunkBytes) {
+      probe.body?.cancel().catch(() => {});
+      return singleStream(total);
+    }
+    probe.body?.cancel().catch(() => {});
+
+    await fs.promises.writeFile(tmp, Buffer.alloc(0));
+    await fs.promises.truncate(tmp, total);
+
+    const ranges = [];
+    for (let start = 0; start < total; start += chunkBytes) {
+      ranges.push([start, Math.min(total - 1, start + chunkBytes - 1)]);
+    }
+
+    let received = 0;
+    let nextRange = 0;
+    const downloadRange = async ([start, end]) => {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          const resp = await fetch(dlink, {
+            headers: { ...cleanHeaders, Range: `bytes=${start}-${end}` },
+            redirect: 'follow',
+          });
+          if (resp.status !== 206) {
+            resp.body?.cancel().catch(() => {});
+            const e = new Error(resp.status === 200
+              ? 'range_not_supported'
+              : `range download failed (HTTP ${resp.status})`);
+            e.rangeUnsupported = resp.status === 200;
+            throw e;
+          }
+
+          const expected = end - start + 1;
+          const contentLength = Number(resp.headers.get('content-length') || 0);
+          if (contentLength && contentLength !== expected) {
+            resp.body?.cancel().catch(() => {});
+            throw new Error(`range size mismatch (expected ${expected}, got ${contentLength})`);
+          }
+
+          const writer = fs.createWriteStream(tmp, {
+            flags: 'r+',
+            start,
+            highWaterMark: 4 * 1024 * 1024,
+          });
+          let written = 0;
+          const guard = new Transform({
+            transform(chunk, enc, cb) {
+              written += chunk.length;
+              received += chunk.length;
+              try { onProgress?.(received, total); } catch {}
+              cb(null, chunk);
+            },
+          });
+          await pipeline(Readable.fromWeb(resp.body), guard, writer);
+          if (written !== expected) {
+            throw new Error(`range incomplete (expected ${expected}, got ${written})`);
+          }
+          return;
+        } catch (err) {
+          if (attempt >= 3) throw err;
+          await new Promise((resolve) => setTimeout(resolve, 400 * attempt));
+        }
+      }
+    };
+
+    const workers = Array.from(
+      { length: Math.min(connections, ranges.length) },
+      async () => {
+        while (true) {
+          const index = nextRange++;
+          if (index >= ranges.length) return;
+          await downloadRange(ranges[index]);
+        }
+      },
+    );
+
+    try {
+      await Promise.all(workers);
+    } catch (err) {
+      fs.unlink(tmp, () => {});
+      if (err.rangeUnsupported) return singleStream(total);
+      throw err;
+    }
+
+    const stat = fs.statSync(tmp);
+    if (stat.size !== total) {
+      fs.unlink(tmp, () => {});
+      throw new Error(`parallel download size mismatch (expected ${total}, got ${stat.size})`);
+    }
+
+    console.log(`[download] parallel: ${ranges.length} ranges / ${Math.min(connections, ranges.length)} connections`);
+    return tmp;
   } catch (err) {
+    probe?.body?.cancel().catch(() => {});
     fs.unlink(tmp, () => {});
     throw err;
   }
-  return tmp;
 }
-
 async function convertToTelegramVideo(inputPath, filename) {
   const ext = extOf(filename);
   if (ext === 'mp4') return { path: inputPath, filename };
