@@ -222,7 +222,7 @@ export async function sendLargeFile({ chatId, filePath, caption, onProgress }) {
     }
   }
 
-  const workers = Math.max(1, Math.min(Number(process.env.MT_PROTO_WORKERS || 16), 32));
+  const workers = Math.max(1, Math.min(Number(process.env.MT_PROTO_WORKERS || 16), 16));
 
   return client.sendFile(target, {
     file: filePath,
