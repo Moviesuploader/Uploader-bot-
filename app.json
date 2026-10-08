@@ -67,6 +67,10 @@
       "description": "0 for unlimited application-level download size.",
       "value": "0",
       "required": false
+    },
+    "DUMP_CHANNEL_ID": {
+      "description": "Optional Telegram dump channel/chat ID. Can also be configured from the owner-only /admin panel.",
+      "required": false
     }
   },
   "formation": {
