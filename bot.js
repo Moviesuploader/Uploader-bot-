@@ -1153,7 +1153,16 @@ async function main() {
     console.warn(`getMe failed (${err.message}) — will keep retrying via the poll loop.`);
   }
   console.log(`Bot API upload cap: ${config.maxFileMb} MB | download cap: ${config.downloadMaxMb || 'unlimited'} MB | API root: ${config.apiRoot}`);
-  console.log(`MTProto large upload: ${mtproto.isEnabled() ? 'enabled' : 'disabled'}`);
+  if (mtproto.isEnabled()) {
+    try {
+      const mt = await mtproto.testConnection();
+      console.log(`MTProto large upload: enabled (@${mt.username || 'private'} | Premium: ${mt.premium ? 'yes' : 'no'})`);
+    } catch (err) {
+      console.warn(`MTProto large upload: configured but unusable — ${err.message}`);
+    }
+  } else {
+    console.log('MTProto large upload: disabled');
+  }
   console.log(`Terabox cookies configured: ${cookiePool.size}`);
   console.log('Listening for messages…');
 
