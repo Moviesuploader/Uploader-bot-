@@ -158,6 +158,10 @@ async function handleMtprotoSetupMessage(msg) {
   const text = String(msg.text || '').trim();
   if (!text) return true;
 
+  // API hash/session are secrets. Remove the admin's input message immediately
+  // after reading it so it does not remain visible in the Telegram chat.
+  const deleteSecretMessage = () => tg.deleteMessage(chatId, msg.message_id);
+
   if (text === '/cancel') {
     mtprotoSetup.delete(String(chatId));
     await tg.sendMessage(chatId, '❌ MTProto setup cancelled.');
@@ -170,6 +174,7 @@ async function handleMtprotoSetupMessage(msg) {
       return true;
     }
     state.values.apiId = Number(text);
+    await deleteSecretMessage();
     state.step = 'apiHash';
     await tg.sendMessage(chatId, '🔐 <b>Now send the API Hash.</b>\n\nIt will not be echoed back.');
     return true;
@@ -181,6 +186,7 @@ async function handleMtprotoSetupMessage(msg) {
       return true;
     }
     state.values.apiHash = text;
+    await deleteSecretMessage();
     state.step = 'session';
     await tg.sendMessage(chatId, '📱 <b>Now send the Session String.</b>\n\nIt will not be echoed back.');
     return true;
@@ -193,6 +199,7 @@ async function handleMtprotoSetupMessage(msg) {
     }
 
     try {
+      await deleteSecretMessage();
       mtproto.saveConfig({ apiId: state.values.apiId, apiHash: state.values.apiHash, session: text });
       mtprotoSetup.delete(String(chatId));
       await tg.sendMessage(chatId, '💾 <b>MTProto config saved.</b>\n\n🧪 Testing connection now…');
