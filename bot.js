@@ -606,7 +606,7 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
     }
 
     const rangeHeader = probe.headers.get('content-range') || '';
-    const match = /^bytes\\s+0-0\\/(\\d+)$/.exec(rangeHeader);
+    const match = /^bytes\s+0-0\/(\d+)$/.exec(rangeHeader);
     const total = match ? Number(match[1]) : 0;
 
     if (probe.status !== 206 || !total) {
