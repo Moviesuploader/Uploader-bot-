@@ -727,14 +727,76 @@ async function deliverFile(chatId, file, provider, status = null, sourceUrl = ''
     const actualSize = fs.statSync(uploadPath).size;
     const needsMtproto = actualSize > botApiMaxBytes;
 
-    if (needsMtproto) {
+    const dumpChannelId = adminConfig.getConfig().dumpChannelId;
+    if (dumpChannelId) {
+      // Store the file once in the dump channel, then copy that Telegram
+      // message to the user. This avoids a second physical upload.
+      if (needsMtproto) {
+        uploadMethod = 'MTProto → Dump → Copy';
+        if (!mtproto.isEnabled()) {
+          throw new Error(
+            `large upload requires MTProto session (file is ${formatSize(actualSize)}; Bot API limit is ${config.maxFileMb} MB)`,
+          );
+        }
+        let uploadLastEdit = 0;
+        const uploadStartedAt = Date.now();
+        const dumped = await mtproto.sendLargeFile({
+          chatId: dumpChannelId,
+          filePath: uploadPath,
+          caption,
+          onProgress: (uploaded, total) => {
+            const now = Date.now();
+            if (now - uploadLastEdit < 4000) return;
+            uploadLastEdit = now;
+            const pct = total ? Math.floor((uploaded / total) * 100) : null;
+            const bar = pct == null
+              ? ''
+              : `${'▰'.repeat(Math.floor(pct / 10))}${'▱'.repeat(10 - Math.floor(pct / 10))} ${pct}%`;
+            const secs = Math.max(1, (now - uploadStartedAt) / 1000);
+            const speed = `${formatSize(Math.round(uploaded / secs))}/s`;
+            tg.editMessageText(
+              chatId,
+              statusId,
+              `📦 <b>Saving to dump…</b>\n${fileEmoji(uploadName)} <b>${esc(uploadName)}</b>\n💾 <code>${esc(formatSize(uploaded))}${total ? ` / ${esc(formatSize(total))}` : ''}</code>  ⚡ <code>${esc(speed)}</code>${bar ? `\n${bar}` : ''}`,
+            );
+          },
+        });
+        const dumpMessageId = dumped?.id || dumped?.message_id;
+        if (!dumpMessageId) throw new Error('Dump upload succeeded but no Telegram message ID was returned');
+        await tg.copyMessage(chatId, dumpChannelId, Number(dumpMessageId));
+      } else {
+        uploadMethod = 'Bot API → Dump → Copy';
+        let dumped;
+        try {
+          dumped = await tg.sendFile({
+            chatId: dumpChannelId,
+            filePath: uploadPath,
+            filename: uploadName,
+            caption,
+            kind: kind === 'video' ? 'video' : kind,
+            thumbPath,
+          });
+        } catch (e1) {
+          if (kind === 'document') throw e1;
+          console.error(`${kind} dump upload failed (${e1.message}) — retrying as document`);
+          dumped = await tg.sendFile({
+            chatId: dumpChannelId,
+            filePath: uploadPath,
+            filename: uploadName,
+            caption,
+            kind: 'document',
+          });
+        }
+        if (!dumped?.message_id) throw new Error('Dump upload succeeded but no Telegram message ID was returned');
+        await tg.copyMessage(chatId, dumpChannelId, dumped.message_id);
+      }
+    } else if (needsMtproto) {
       uploadMethod = 'MTProto';
       if (!mtproto.isEnabled()) {
         throw new Error(
           `large upload requires MTProto session (file is ${formatSize(actualSize)}; Bot API limit is ${config.maxFileMb} MB)`,
         );
       }
-
       let uploadLastEdit = 0;
       const uploadStartedAt = Date.now();
       await mtproto.sendLargeFile({
