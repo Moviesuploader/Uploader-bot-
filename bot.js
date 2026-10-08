@@ -476,7 +476,11 @@ function safeFileName(name, dlink) {
 // Download a dlink to a temp file, enforcing the size cap both from the
 // content-length header and while streaming.
 async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
-  const connections = Math.max(1, Math.min(Number(process.env.DOWNLOAD_CONNECTIONS || 16), 32));
+  // Some file hosts advertise byte-range support but aggressively rate-limit
+  // bursts of parallel range requests. A large 16-way burst can therefore turn
+  // a perfectly valid download into HTTP 429. Start conservatively and fall
+  // back to one stream when the host asks us to slow down.
+  const connections = Math.max(1, Math.min(Number(process.env.DOWNLOAD_CONNECTIONS || 4), 16));
   const chunkBytes = Math.max(
     8 * 1024 * 1024,
     Number(process.env.DOWNLOAD_CHUNK_MB || 32) * 1024 * 1024,
@@ -488,57 +492,112 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
 
   const tmp = path.join(
     downloadDir,
-    `dl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext ? `.${ext}` : ''}`,
+    'dl_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8) + (ext ? '.' + ext : ''),
   );
 
+  const retryAfterMs = (resp) => {
+    const value = resp?.headers?.get?.('retry-after');
+    if (!value) return 1500;
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(60_000, Math.max(1000, seconds * 1000));
+    const when = Date.parse(value);
+    if (Number.isFinite(when)) return Math.min(60_000, Math.max(1000, when - Date.now()));
+    return 1500;
+  };
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
   const singleStream = async (knownLength = 0) => {
-    const resp = await fetch(dlink, { headers: cleanHeaders, redirect: 'follow' });
-    if (!resp.ok && resp.status !== 206) {
-      resp.body?.cancel().catch(() => {});
-      throw new Error(`download failed (HTTP ${resp.status})`);
-    }
-    const len = knownLength || Number(resp.headers.get('content-length') || 0);
-    if (len > downloadMaxBytes) {
-      resp.body?.cancel().catch(() => {});
-      const e = new Error('too_big');
-      e.tooBig = true;
-      throw e;
-    }
-    let received = 0;
-    const guard = new Transform({
-      transform(chunk, enc, cb) {
-        received += chunk.length;
-        try { onProgress?.(received, len); } catch {}
-        if (received > downloadMaxBytes) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      try {
+        const resp = await fetch(dlink, { headers: cleanHeaders, redirect: 'follow' });
+        if (resp.status === 429) {
+          const wait = retryAfterMs(resp);
+          resp.body?.cancel().catch(() => {});
+          lastError = new Error('download rate limited (HTTP 429)');
+          if (attempt < 4) {
+            console.warn('[download] source rate-limited; retrying after ' + Math.ceil(wait / 1000) + 's');
+            await sleep(wait);
+            continue;
+          }
+          throw lastError;
+        }
+        if (resp.status >= 500 && resp.status <= 599) {
+          resp.body?.cancel().catch(() => {});
+          lastError = new Error('download failed (HTTP ' + resp.status + ')');
+          if (attempt < 4) {
+            await sleep(Math.min(10_000, 1000 * attempt));
+            continue;
+          }
+          throw lastError;
+        }
+        if (!resp.ok && resp.status !== 206) {
+          resp.body?.cancel().catch(() => {});
+          throw new Error('download failed (HTTP ' + resp.status + ')');
+        }
+
+        const len = knownLength || Number(resp.headers.get('content-length') || 0);
+        if (len > downloadMaxBytes) {
+          resp.body?.cancel().catch(() => {});
           const e = new Error('too_big');
           e.tooBig = true;
-          cb(e);
-          return;
+          throw e;
         }
-        cb(null, chunk);
-      },
-    });
-    try {
-      await pipeline(
-        Readable.fromWeb(resp.body),
-        guard,
-        fs.createWriteStream(tmp, { highWaterMark: 4 * 1024 * 1024 }),
-      );
-    } catch (err) {
-      fs.unlink(tmp, () => {});
-      throw err;
+
+        let received = 0;
+        const guard = new Transform({
+          transform(chunk, enc, cb) {
+            received += chunk.length;
+            try { onProgress?.(received, len); } catch {}
+            if (received > downloadMaxBytes) {
+              const e = new Error('too_big');
+              e.tooBig = true;
+              cb(e);
+              return;
+            }
+            cb(null, chunk);
+          },
+        });
+
+        try {
+          await pipeline(
+            Readable.fromWeb(resp.body),
+            guard,
+            fs.createWriteStream(tmp, { highWaterMark: 4 * 1024 * 1024 }),
+          );
+        } catch (err) {
+          fs.unlink(tmp, () => {});
+          throw err;
+        }
+        return tmp;
+      } catch (err) {
+        lastError = err;
+        if (err?.tooBig || attempt >= 4) throw err;
+      }
     }
-    return tmp;
+    throw lastError || new Error('download failed');
   };
 
   let probe = null;
   try {
+    // Probe once to discover the total size. If the probe itself is rate-limited,
+    // do not immediately fire more range requests; wait and use a normal stream.
     probe = await fetch(dlink, {
       headers: { ...cleanHeaders, Range: 'bytes=0-0' },
       redirect: 'follow',
     });
+
+    if (probe.status === 429) {
+      const wait = retryAfterMs(probe);
+      probe.body?.cancel().catch(() => {});
+      console.warn('[download] range probe rate-limited; waiting ' + Math.ceil(wait / 1000) + 's and switching to single stream');
+      await sleep(wait);
+      return singleStream();
+    }
+
     const rangeHeader = probe.headers.get('content-range') || '';
-    const match = /^bytes\s+0-0\/(\d+)$/.exec(rangeHeader);
+    const match = /^bytes\\s+0-0\\/(\\d+)$/.exec(rangeHeader);
     const total = match ? Number(match[1]) : 0;
 
     if (probe.status !== 206 || !total) {
@@ -567,32 +626,48 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
 
     let received = 0;
     let nextRange = 0;
-    const downloadRange = async ([start, end]) => {
+    let rateLimitedWait = 0;
+    const abort = new AbortController();
+
+    const downloadRange = async ([rangeStart, rangeEnd]) => {
       for (let attempt = 1; attempt <= 3; attempt += 1) {
         try {
           const resp = await fetch(dlink, {
-            headers: { ...cleanHeaders, Range: `bytes=${start}-${end}` },
+            headers: { ...cleanHeaders, Range: 'bytes=' + rangeStart + '-' + rangeEnd },
             redirect: 'follow',
+            signal: abort.signal,
           });
+
+          if (resp.status === 429) {
+            rateLimitedWait = Math.max(rateLimitedWait, retryAfterMs(resp));
+            resp.body?.cancel().catch(() => {});
+            abort.abort();
+            const e = new Error('range download rate limited (HTTP 429)');
+            e.rateLimited = true;
+            throw e;
+          }
+
           if (resp.status !== 206) {
             resp.body?.cancel().catch(() => {});
-            const e = new Error(resp.status === 200
-              ? 'range_not_supported'
-              : `range download failed (HTTP ${resp.status})`);
+            const e = new Error(
+              resp.status === 200
+                ? 'range_not_supported'
+                : 'range download failed (HTTP ' + resp.status + ')',
+            );
             e.rangeUnsupported = resp.status === 200;
             throw e;
           }
 
-          const expected = end - start + 1;
+          const expected = rangeEnd - rangeStart + 1;
           const contentLength = Number(resp.headers.get('content-length') || 0);
           if (contentLength && contentLength !== expected) {
             resp.body?.cancel().catch(() => {});
-            throw new Error(`range size mismatch (expected ${expected}, got ${contentLength})`);
+            throw new Error('range size mismatch (expected ' + expected + ', got ' + contentLength + ')');
           }
 
           const writer = fs.createWriteStream(tmp, {
             flags: 'r+',
-            start,
+            start: rangeStart,
             highWaterMark: 4 * 1024 * 1024,
           });
           let written = 0;
@@ -604,14 +679,16 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
               cb(null, chunk);
             },
           });
+
           await pipeline(Readable.fromWeb(resp.body), guard, writer);
           if (written !== expected) {
-            throw new Error(`range incomplete (expected ${expected}, got ${written})`);
+            throw new Error('range incomplete (expected ' + expected + ', got ' + written + ')');
           }
           return;
         } catch (err) {
+          if (err?.rateLimited || abort.signal.aborted) throw err;
           if (attempt >= 3) throw err;
-          await new Promise((resolve) => setTimeout(resolve, 400 * attempt));
+          await sleep(400 * attempt);
         }
       }
     };
@@ -619,10 +696,15 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
     const workers = Array.from(
       { length: Math.min(connections, ranges.length) },
       async () => {
-        while (true) {
+        while (!abort.signal.aborted) {
           const index = nextRange++;
           if (index >= ranges.length) return;
-          await downloadRange(ranges[index]);
+          try {
+            await downloadRange(ranges[index]);
+          } catch (err) {
+            abort.abort();
+            throw err;
+          }
         }
       },
     );
@@ -631,6 +713,11 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
       await Promise.all(workers);
     } catch (err) {
       fs.unlink(tmp, () => {});
+      if (rateLimitedWait > 0) {
+        console.warn('[download] range requests were rate-limited; retrying as a single stream');
+        await sleep(rateLimitedWait);
+        return singleStream(total);
+      }
       if (err.rangeUnsupported) return singleStream(total);
       throw err;
     }
@@ -638,10 +725,10 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
     const stat = fs.statSync(tmp);
     if (stat.size !== total) {
       fs.unlink(tmp, () => {});
-      throw new Error(`parallel download size mismatch (expected ${total}, got ${stat.size})`);
+      throw new Error('parallel download size mismatch (expected ' + total + ', got ' + stat.size + ')');
     }
 
-    console.log(`[download] parallel: ${ranges.length} ranges / ${Math.min(connections, ranges.length)} connections`);
+    console.log('[download] parallel: ' + ranges.length + ' ranges / ' + Math.min(connections, ranges.length) + ' connections');
     return tmp;
   } catch (err) {
     probe?.body?.cancel().catch(() => {});
