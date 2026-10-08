@@ -664,7 +664,7 @@ async function deliverFile(chatId, file, provider, status = null, sourceUrl = ''
   const statusId = statusMsg.message_id;
   let tmp = null;
   let uploadMethod = '';
-  const downloadStartedAt = Date.now();
+  let stage = 'download';
   let thumbPath = null;
   try {
     const fname = safeFileName(file.name, file.dlink);
@@ -691,6 +691,7 @@ async function deliverFile(chatId, file, provider, status = null, sourceUrl = ''
     };
     tmp = await downloadToDisk(file.dlink, headers, extOf(fname), onProgress);
 
+    stage = 'media-preparation';
     // Telegram's sendVideo expects a playable video container; normalize
     // non-MP4 video sources to MP4 instead of silently sending them as files.
     let uploadPath = tmp;
@@ -714,6 +715,7 @@ async function deliverFile(chatId, file, provider, status = null, sourceUrl = ''
       } catch {}
     }
 
+    stage = 'upload';
     await tg.editMessageText(
       chatId,
       statusId,
@@ -729,6 +731,7 @@ async function deliverFile(chatId, file, provider, status = null, sourceUrl = ''
 
     const dumpChannelId = adminConfig.getConfig().dumpChannelId;
     if (dumpChannelId) {
+      stage = 'dump-upload';
       // Store the file once in the dump channel, then copy that Telegram
       // message to the user. This avoids a second physical upload.
       if (needsMtproto) {
@@ -791,6 +794,7 @@ async function deliverFile(chatId, file, provider, status = null, sourceUrl = ''
         await tg.copyMessage(chatId, dumpChannelId, dumped.message_id);
       }
     } else if (needsMtproto) {
+      stage = 'mtproto-upload';
       uploadMethod = 'MTProto';
       if (!mtproto.isEnabled()) {
         throw new Error(
@@ -821,6 +825,7 @@ async function deliverFile(chatId, file, provider, status = null, sourceUrl = ''
         },
       });
     } else {
+      stage = 'bot-api-upload';
       uploadMethod = 'Bot API';
       await tg.sendChatAction(
         chatId,
@@ -860,7 +865,7 @@ async function deliverFile(chatId, file, provider, status = null, sourceUrl = ''
   } catch (err) {
     const reason = err.tooBig
       ? 'the file exceeded the configured download-size cap'
-      : esc(err.message);
+      : esc(`${stage}: ${err.message || 'unknown error'}`);
     await sendDownloadLog({
       chatId,
       actor,
@@ -983,6 +988,20 @@ async function handleCallback(cq) {
     await tg.sendMessage(
       chatId,
       `⚠️ <b>Large upload session not configured</b>\n\n${fileEmoji(file.name)} <b>${esc(file.name)}</b>\n💾 <code>${esc(file.size)}</code> — over the ${config.maxFileMb} MB Bot API limit.\n\n🔗 <b>Direct link:</b>\n<pre>${esc(file.dlink)}</pre>\n\n<i>Add the MTProto session variables to enable large uploads.</i>`,
+    );
+    return;
+  }
+  const knownSize = Number(file.size_bytes || 0);
+  if (knownSize > botApiMaxBytes && !mtproto.isEnabled()) {
+    await tg.answerCallbackQuery(cq.id, '⚠️ MTProto required for this file', true);
+    await tg.sendMessage(
+      chatId,
+      `⚠️ <b>Large upload session is not configured</b>\n\n` +
+        `${fileEmoji(file.name)} <b>${esc(file.name)}</b>\n` +
+        `💾 <code>${esc(file.size)}</code> — over the ${config.maxFileMb} MB Bot API limit.\n\n` +
+        `The file was <b>not downloaded</b>, so no time/bandwidth is wasted.\n\n` +
+        `🔗 <b>Direct link:</b>\n<pre>${esc(file.dlink)}</pre>\n\n` +
+        `<i>Configure MTProto from /admin → 📱 Session to enable large downloads.</i>`,
     );
     return;
   }
