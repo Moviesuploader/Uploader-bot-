@@ -114,7 +114,7 @@ export async function sendLargeFile({ chatId, filePath, caption, onProgress }) {
   const client = await getClient();
   if (!client) throw new Error('MTProto session is not configured');
 
-  const workers = Math.max(1, Math.min(Number(process.env.MT_PROTO_WORKERS || 8), 16));
+  const workers = Math.max(1, Math.min(Number(process.env.MT_PROTO_WORKERS || 16), 32));
 
   return client.sendFile(chatId, {
     file: filePath,
