@@ -59,6 +59,156 @@ function claimOwner(chatId) {
   console.log(`[access] owner claimed: ${chatId}`);
 }
 
+
+const mtprotoSetup = new Map();
+
+function isAdmin(chatId) {
+  return ownerIds.has(String(chatId));
+}
+
+function mtprotoPanelText() {
+  const st = mtproto.status();
+  return `⚙️ <b>MTProto Admin Setup</b>\n\n🆔 API ID: <code>${st.apiId || 'Not set'}</code>\n🔐 API Hash: <code>${st.hasApiHash ? 'Configured' : 'Not set'}</code>\n📱 Session: <code>${st.hasSession ? 'Configured' : 'Not set'}</code>\n\nStatus: ${st.enabled ? '✅ Ready for large uploads' : '⚠️ Not configured'}\n\nSensitive values are never echoed back in chat.`;
+}
+
+function mtprotoPanelMarkup() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '🆔 Set API ID', callback_data: 'mt:apiid' },
+        { text: '🔐 Set API Hash', callback_data: 'mt:apihash' },
+      ],
+      [{ text: '📱 Set Session', callback_data: 'mt:session' }],
+      [
+        { text: '🧪 Test Connection', callback_data: 'mt:test' },
+        { text: '🗑 Clear Config', callback_data: 'mt:clear' },
+      ],
+      [{ text: '🔄 Refresh', callback_data: 'mt:refresh' }],
+    ],
+  };
+}
+
+async function showMtprotoPanel(chatId, messageId = null) {
+  const text = mtprotoPanelText();
+  if (messageId) {
+    await tg.editMessageText(chatId, messageId, text, { reply_markup: mtprotoPanelMarkup() });
+  } else {
+    await tg.sendMessage(chatId, text, { reply_markup: mtprotoPanelMarkup() });
+  }
+}
+
+async function handleMtprotoCallback(cq) {
+  const chatId = cq.message?.chat?.id;
+  if (!chatId || !isAdmin(chatId)) {
+    await tg.answerCallbackQuery(cq.id, '🔒 Admin only', true);
+    return;
+  }
+
+  const action = String(cq.data || '').split(':')[1] || '';
+
+  if (action === 'refresh') {
+    await tg.answerCallbackQuery(cq.id, 'Refreshed');
+    await showMtprotoPanel(chatId, cq.message.message_id);
+    return;
+  }
+
+  if (action === 'clear') {
+    mtproto.clearConfig();
+    await tg.answerCallbackQuery(cq.id, 'Config cleared');
+    await showMtprotoPanel(chatId, cq.message.message_id);
+    return;
+  }
+
+  if (action === 'test') {
+    await tg.answerCallbackQuery(cq.id, 'Testing MTProto…');
+    try {
+      const result = await mtproto.testConnection();
+      await tg.editMessageText(chatId, cq.message.message_id,
+        `🧪 <b>MTProto connection OK</b> ✅\n\n👤 Account: <code>@${esc(result.username || 'private')}</code>\n🆔 ID: <code>${esc(result.id)}</code>\n⭐ Premium: <b>${result.premium ? 'Yes' : 'No'}</b>`,
+        { reply_markup: mtprotoPanelMarkup() });
+    } catch (err) {
+      await tg.editMessageText(chatId, cq.message.message_id,
+        `❌ <b>MTProto connection failed</b>\n<blockquote>${esc(err.message)}</blockquote>`,
+        { reply_markup: mtprotoPanelMarkup() });
+    }
+    return;
+  }
+
+  const stepMap = { apiid: 'apiId', apihash: 'apiHash', session: 'session' };
+  const step = stepMap[action];
+  if (!step) return;
+
+  mtprotoSetup.set(String(chatId), { step, values: {} });
+  const prompts = {
+    apiId: '🆔 <b>Send API ID</b>\n\nOnly the numeric API ID.\n/cancel to abort.',
+    apiHash: '🔐 <b>Send API Hash</b>\n\nIt will not be echoed back.\n/cancel to abort.',
+    session: '📱 <b>Send Session String</b>\n\nIt will not be echoed back.\n/cancel to abort.',
+  };
+  await tg.answerCallbackQuery(cq.id);
+  await tg.sendMessage(chatId, prompts[step]);
+}
+
+async function handleMtprotoSetupMessage(msg) {
+  const chatId = msg.chat?.id;
+  if (!chatId || !isAdmin(chatId)) return false;
+
+  const state = mtprotoSetup.get(String(chatId));
+  if (!state) return false;
+
+  const text = String(msg.text || '').trim();
+  if (!text) return true;
+
+  if (text === '/cancel') {
+    mtprotoSetup.delete(String(chatId));
+    await tg.sendMessage(chatId, '❌ MTProto setup cancelled.');
+    return true;
+  }
+
+  if (state.step === 'apiId') {
+    if (!/^\d+$/.test(text) || Number(text) <= 0) {
+      await tg.sendMessage(chatId, '❌ API ID must be a positive number. Try again or /cancel.');
+      return true;
+    }
+    state.values.apiId = Number(text);
+    state.step = 'apiHash';
+    await tg.sendMessage(chatId, '🔐 <b>Now send the API Hash.</b>\n\nIt will not be echoed back.');
+    return true;
+  }
+
+  if (state.step === 'apiHash') {
+    if (text.length < 10) {
+      await tg.sendMessage(chatId, '❌ API Hash looks too short. Try again or /cancel.');
+      return true;
+    }
+    state.values.apiHash = text;
+    state.step = 'session';
+    await tg.sendMessage(chatId, '📱 <b>Now send the Session String.</b>\n\nIt will not be echoed back.');
+    return true;
+  }
+
+  if (state.step === 'session') {
+    if (text.length < 20) {
+      await tg.sendMessage(chatId, '❌ Session String looks too short. Try again or /cancel.');
+      return true;
+    }
+
+    try {
+      mtproto.saveConfig({ apiId: state.values.apiId, apiHash: state.values.apiHash, session: text });
+      mtprotoSetup.delete(String(chatId));
+      await tg.sendMessage(chatId, '💾 <b>MTProto config saved.</b>\n\n🧪 Testing connection now…');
+      const result = await mtproto.testConnection();
+      await tg.sendMessage(chatId,
+        `✅ <b>MTProto is ready!</b>\n\n👤 Account: <code>@${esc(result.username || 'private')}</code>\n🆔 ID: <code>${esc(result.id)}</code>\n⭐ Premium: <b>${result.premium ? 'Yes' : 'No'}</b>\n\nLarge TeraBox uploads can now use this session.`);
+    } catch (err) {
+      await tg.sendMessage(chatId,
+        `⚠️ <b>Config saved, but connection test failed.</b>\n<blockquote>${esc(err.message)}</blockquote>\n\nOpen /mtproto to retry.`);
+    }
+    return true;
+  }
+
+  return true;
+}
+
 const VIDEO_EXT = new Set(['mp4', 'mkv', 'webm', 'mov', 'm4v', 'avi', 'mpg', 'mpeg']);
 const AUDIO_EXT = new Set(['mp3', 'm4a', 'flac', 'wav', 'ogg', 'aac', 'opus', 'wma']);
 const extOf = (name) => {
@@ -214,6 +364,13 @@ async function handleMessage(msg) {
   } else if (!ownerIds.has(String(chatId))) {
     console.log(`[access] blocked unauthorized chat ${chatId}`);
     await tg.sendMessage(chatId, '🔒 <b>Private bot</b>\n<blockquote>Access denied.</blockquote>');
+    return;
+  }
+
+  if (await handleMtprotoSetupMessage(msg)) return;
+
+  if (text.startsWith('/mtproto') || text.startsWith('/admin')) {
+    await showMtprotoPanel(chatId);
     return;
   }
 
@@ -413,6 +570,11 @@ async function deliverFile(chatId, file, provider, status = null) {
 }
 
 async function handleCallback(cq) {
+  if (String(cq.data || '').startsWith('mt:')) {
+    await handleMtprotoCallback(cq);
+    return;
+  }
+
   const chatId = cq.message && cq.message.chat && cq.message.chat.id;
   if (ownerIds.size && !ownerIds.has(String(chatId))) {
     await tg.answerCallbackQuery(cq.id, '🔒 Private bot', true);
