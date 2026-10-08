@@ -147,24 +147,40 @@ async function convertToTelegramVideo(inputPath, filename) {
     downloadDir,
     `tg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.mp4`,
   );
+  const timeout = Number(process.env.FFMPEG_TIMEOUT_MS || 2 * 60 * 60 * 1000);
 
+  // For multi-GB sources, try a lossless container remux first. Only
+  // re-encode when the source codecs cannot be placed in MP4.
   try {
     await execFileAsync('ffmpeg', [
       '-hide_banner', '-loglevel', 'error', '-y',
       '-i', inputPath,
       '-map', '0:v:0',
       '-map', '0:a:0?',
-      '-c:v', 'libx264',
-      '-preset', process.env.FFMPEG_PRESET || 'veryfast',
-      '-crf', process.env.FFMPEG_CRF || '23',
-      '-c:a', 'aac',
-      '-b:a', process.env.FFMPEG_AUDIO_BITRATE || '128k',
+      '-c', 'copy',
       '-movflags', '+faststart',
       outputPath,
-    ], { timeout: Number(process.env.FFMPEG_TIMEOUT_MS || 30 * 60 * 1000) });
-  } catch (err) {
+    ], { timeout });
+  } catch {
     fs.unlink(outputPath, () => {});
-    throw new Error(`video conversion failed: ${err.message}`);
+    try {
+      await execFileAsync('ffmpeg', [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-i', inputPath,
+        '-map', '0:v:0',
+        '-map', '0:a:0?',
+        '-c:v', 'libx264',
+        '-preset', process.env.FFMPEG_PRESET || 'veryfast',
+        '-crf', process.env.FFMPEG_CRF || '23',
+        '-c:a', 'aac',
+        '-b:a', process.env.FFMPEG_AUDIO_BITRATE || '128k',
+        '-movflags', '+faststart',
+        outputPath,
+      ], { timeout });
+    } catch (err) {
+      fs.unlink(outputPath, () => {});
+      throw new Error(`video conversion failed: ${err.message}`);
+    }
   }
 
   const stat = fs.statSync(outputPath);
@@ -176,7 +192,6 @@ async function convertToTelegramVideo(inputPath, filename) {
   }
   return { path: outputPath, filename: `${base}.mp4` };
 }
-
 async function handleMessage(msg) {
   const chatId = msg.chat && msg.chat.id;
   if (!chatId) return;
@@ -384,7 +399,7 @@ async function deliverFile(chatId, file, provider, status = null) {
     await tg.deleteMessage(chatId, statusId);
   } catch (err) {
     const reason = err.tooBig
-      ? `the file exceeded the ${config.maxFileMb} MB limit while downloading`
+      ? 'the file exceeded the configured download-size cap'
       : esc(err.message);
     await tg.editMessageText(
       chatId,
