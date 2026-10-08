@@ -12,6 +12,7 @@ import { extractMediaLinks } from './src/detect.js';
 import { buildInfoPayload, esc } from './src/format.js';
 import { formatSize, fileEmoji } from './src/utils.js';
 import { Cache } from './src/cache.js';
+import * as mtproto from './src/mtproto.js';
 
 if (!config.botToken) {
   console.error('BOT_TOKEN is missing — set it in .env and restart.');
@@ -23,7 +24,8 @@ fs.mkdirSync(downloadDir, { recursive: true });
 
 const execFileAsync = promisify(execFile);
 const cache = new Cache();
-const maxBytes = config.maxFileMb * 1024 * 1024;
+const botApiMaxBytes = config.maxFileMb * 1024 * 1024;
+const downloadMaxBytes = config.downloadMaxMb > 0 ? config.downloadMaxMb * 1024 * 1024 : Infinity;
 
 // Hosting health endpoint. Koyeb/Render-style web services require a listening
 // port even though Telegram itself is handled through long polling.
@@ -99,7 +101,7 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
     throw new Error(`download failed (HTTP ${resp.status})`);
   }
   const len = Number(resp.headers.get('content-length') || 0);
-  if (len > maxBytes) {
+  if (len > downloadMaxBytes) {
     resp.body?.cancel().catch(() => {});
     const e = new Error('too_big');
     e.tooBig = true;
@@ -118,7 +120,7 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
           onProgress(received, len);
         } catch {}
       }
-      if (received > maxBytes) {
+      if (received > downloadMaxBytes) {
         const e = new Error('too_big');
         e.tooBig = true;
         cb(e);
@@ -166,7 +168,7 @@ async function convertToTelegramVideo(inputPath, filename) {
   }
 
   const stat = fs.statSync(outputPath);
-  if (stat.size > maxBytes) {
+  if (stat.size > downloadMaxBytes) {
     fs.unlink(outputPath, () => {});
     const e = new Error('too_big');
     e.tooBig = true;
@@ -209,8 +211,8 @@ async function handleMessage(msg) {
         `🎬 Diskwala links → info + downloads\n` +
         `🌐 Terabox links → info + downloads\n` +
         `▶️ YouTube links → video downloads\n` +
-        `📦 Files up to <b>${config.maxFileMb} MB</b> land right here in chat\n` +
-        `🔗 Bigger files get a direct download link\n\n` +
+        `📦 Small files use Bot API; large files use MTProto when configured\n` +
+        `🎬 Video output is normalized to MP4 for playback\n\n` +
         `<i>Just paste a link to start ⚡</i>`,
     );
     return;
@@ -320,13 +322,64 @@ async function deliverFile(chatId, file, provider, status = null) {
       kind === 'video' ? 'upload_video' : kind === 'audio' ? 'upload_audio' : 'upload_document',
     );
     const caption = `✅ <b>${esc(uploadName)}</b>\n💾 ${esc(file.size)}`;
-    try {
-      await tg.sendFile({ chatId, filePath: uploadPath, filename: uploadName, caption, kind: kind === 'video' ? 'video' : kind, thumbPath });
-    } catch (e1) {
-      if (kind === 'document') throw e1;
-      // Telegram may reject some containers as video/audio — retry as a plain document.
-      console.error(`${kind} upload failed (${e1.message}) — retrying as document`);
-      await tg.sendFile({ chatId, filePath: uploadPath, filename: uploadName, caption, kind: 'document' });
+    const actualSize = fs.statSync(uploadPath).size;
+    const needsMtproto = actualSize > botApiMaxBytes;
+
+    if (needsMtproto) {
+      if (!mtproto.isEnabled()) {
+        throw new Error(
+          `large upload requires MTProto session (file is ${formatSize(actualSize)}; Bot API limit is ${config.maxFileMb} MB)`,
+        );
+      }
+
+      let uploadLastEdit = 0;
+      const uploadStartedAt = Date.now();
+      await mtproto.sendLargeFile({
+        chatId,
+        filePath: uploadPath,
+        caption,
+        onProgress: (uploaded, total) => {
+          const now = Date.now();
+          if (now - uploadLastEdit < 4000) return;
+          uploadLastEdit = now;
+          const pct = total ? Math.floor((uploaded / total) * 100) : null;
+          const bar = pct == null
+            ? ''
+            : `${'▰'.repeat(Math.floor(pct / 10))}${'▱'.repeat(10 - Math.floor(pct / 10))} ${pct}%`;
+          const secs = Math.max(1, (now - uploadStartedAt) / 1000);
+          const speed = `${formatSize(Math.round(uploaded / secs))}/s`;
+          tg.editMessageText(
+            chatId,
+            statusId,
+            `📤 <b>Uploading via MTProto…</b>\n${fileEmoji(uploadName)} <b>${esc(uploadName)}</b>\n💾 <code>${esc(formatSize(uploaded))}${total ? ` / ${esc(formatSize(total))}` : ''}</code>  ⚡ <code>${esc(speed)}</code>${bar ? `\n${bar}` : ''}`,
+          );
+        },
+      });
+    } else {
+      await tg.sendChatAction(
+        chatId,
+        kind === 'video' ? 'upload_video' : kind === 'audio' ? 'upload_audio' : 'upload_document',
+      );
+      try {
+        await tg.sendFile({
+          chatId,
+          filePath: uploadPath,
+          filename: uploadName,
+          caption,
+          kind: kind === 'video' ? 'video' : kind,
+          thumbPath,
+        });
+      } catch (e1) {
+        if (kind === 'document') throw e1;
+        console.error(`${kind} upload failed (${e1.message}) — retrying as document`);
+        await tg.sendFile({
+          chatId,
+          filePath: uploadPath,
+          filename: uploadName,
+          caption,
+          kind: 'document',
+        });
+      }
     }
     await tg.deleteMessage(chatId, statusId);
   } catch (err) {
@@ -393,11 +446,11 @@ async function handleCallback(cq) {
       );
       return;
     }
-    if (file.size_bytes > maxBytes) {
+    if (file.size_bytes > botApiMaxBytes && !mtproto.isEnabled()) {
       await tg.editMessageText(
         chatId,
         status.message_id,
-        `⚠️ <b>Too big for Telegram</b>\n\n${fileEmoji(file.name)} <b>${esc(file.name)}</b>\n💾 <code>${esc(file.size)}</code> — over the ${config.maxFileMb} MB bot limit.\n\n🔗 <b>Direct link:</b>\n<pre>${esc(file.dlink)}</pre>`,
+        `⚠️ <b>Large upload session not configured</b>\n\n${fileEmoji(file.name)} <b>${esc(file.name)}</b>\n💾 <code>${esc(file.size)}</code> — over the ${config.maxFileMb} MB Bot API limit.\n\n🔗 <b>Direct link:</b>\n<pre>${esc(file.dlink)}</pre>\n\n<i>Add the MTProto session variables to enable large uploads.</i>`,
       );
       return;
     }
@@ -423,19 +476,14 @@ async function handleCallback(cq) {
   }
 
   // "⬇️" button — deliver the file into the chat.
-  if (file.size_bytes > maxBytes) {
-    await tg.answerCallbackQuery(
-      cq.id,
-      `⚠️ ${file.size} is over the ${config.maxFileMb} MB bot limit — link only`,
-      true,
-    );
+  if (file.size_bytes > botApiMaxBytes && !mtproto.isEnabled()) {
+    await tg.answerCallbackQuery(cq.id, `⚠️ ${file.size} needs MTProto — link only`, true);
     await tg.sendMessage(
       chatId,
-      `⚠️ <b>Too big for Telegram</b>\n\n${fileEmoji(file.name)} <b>${esc(file.name)}</b>\n💾 <code>${esc(file.size)}</code> — over the ${config.maxFileMb} MB bot limit.\n\n🔗 <b>Direct link:</b>\n<pre>${esc(file.dlink)}</pre>\n\n<i>💡 The local Bot API server raises this limit to 2 GB.</i>`,
+      `⚠️ <b>Large upload session not configured</b>\n\n${fileEmoji(file.name)} <b>${esc(file.name)}</b>\n💾 <code>${esc(file.size)}</code> — over the ${config.maxFileMb} MB Bot API limit.\n\n🔗 <b>Direct link:</b>\n<pre>${esc(file.dlink)}</pre>\n\n<i>Add the MTProto session variables to enable large uploads.</i>`,
     );
     return;
   }
-
   await tg.answerCallbackQuery(cq.id, '⏬ Download started…');
   await deliverFile(chatId, file, entry.provider);
 }
@@ -447,7 +495,8 @@ async function main() {
   } catch (err) {
     console.warn(`getMe failed (${err.message}) — will keep retrying via the poll loop.`);
   }
-  console.log(`Max file size: ${config.maxFileMb} MB | API root: ${config.apiRoot}`);
+  console.log(`Bot API upload cap: ${config.maxFileMb} MB | download cap: ${config.downloadMaxMb || 'unlimited'} MB | API root: ${config.apiRoot}`);
+  console.log(`MTProto large upload: ${mtproto.isEnabled() ? 'enabled' : 'disabled'}`);
   console.log(`Terabox cookies configured: ${cookiePool.size}`);
   console.log('Listening for messages…');
 
