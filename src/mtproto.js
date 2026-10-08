@@ -207,6 +207,10 @@ export async function sendLargeFile({ chatId, filePath, caption, onProgress }) {
   const client = await getClient();
   if (!client) throw new Error('MTProto session is not configured');
 
+  // teleproto's progressCallback is a fraction from 0..1, not byte counts.
+  // Convert it to real bytes before the bot renders speed/progress.
+  const fileBytes = fs.statSync(filePath).size;
+
   let target = chatId;
   try {
     target = await client.getEntity(chatId);
@@ -230,9 +234,10 @@ export async function sendLargeFile({ chatId, filePath, caption, onProgress }) {
     forceDocument: false,
     supportsStreaming: true,
     workers,
-    progressCallback: (uploaded, total) => {
+    progressCallback: (progress) => {
       try {
-        onProgress?.(Number(uploaded) || 0, Number(total) || 0);
+        const fraction = Math.max(0, Math.min(1, Number(progress) || 0));
+        onProgress?.(Math.round(fileBytes * fraction), fileBytes);
       } catch {}
     },
   });
