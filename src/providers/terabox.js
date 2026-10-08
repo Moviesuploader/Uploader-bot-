@@ -1,334 +1,151 @@
-import crypto from 'node:crypto';
-import { formatSize, findBetween } from '../utils.js';
+import { formatSize } from '../utils.js';
 
 export const name = 'terabox';
 
-// Terabox and its known mirror/alias domains. Share links on any of these
-// resolve through the same backend.
 export const hosts = new Set([
-  'terabox.com',
-  'www.terabox.com',
-  'terabox.app',
-  'www.terabox.app',
-  'teraboxapp.com',
-  'www.teraboxapp.com',
-  '1024terabox.com',
-  'www.1024terabox.com',
-  '1024tera.com',
-  'www.1024tera.com',
-  '1024tera.co',
-  'www.1024tera.co',
-  'teraboxlink.com',
-  'www.teraboxlink.com',
-  'terasharelink.com',
-  'www.terasharelink.com',
-  'terafileshare.com',
-  'www.terafileshare.com',
-  'nephobox.com',
-  'www.nephobox.com',
-  'freeterabox.com',
-  'www.freeterabox.com',
-  '4funbox.com',
-  'www.4funbox.com',
-  'mirrobox.com',
-  'www.mirrobox.com',
-  'momerybox.com',
-  'www.momerybox.com',
-  'tibibox.com',
-  'www.tibibox.com',
-  'dubox.com',
-  'www.dubox.com',
+  'terabox.com','www.terabox.com','terabox.app','www.terabox.app',
+  'teraboxapp.com','www.teraboxapp.com','1024terabox.com','www.1024terabox.com',
+  '1024tera.com','www.1024tera.com','1024tera.co','www.1024tera.co',
+  'teraboxlink.com','www.teraboxlink.com','terasharelink.com','www.terasharelink.com',
+  'terafileshare.com','www.terafileshare.com','nephobox.com','www.nephobox.com',
+  'freeterabox.com','www.freeterabox.com','4funbox.com','www.4funbox.com',
+  'mirrobox.com','www.mirrobox.com','momerybox.com','www.momerybox.com',
+  'tibibox.com','www.tibibox.com','dubox.com','www.dubox.com',
 ]);
 
 const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
 
-// Browser-like headers. Do NOT set Host / Connection / Accept-Encoding —
-// undici manages those itself and rejects some of them.
-const BROWSER_HEADERS = {
-  'User-Agent': UA,
-  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.9',
-  DNT: '1',
-  'sec-ch-ua': '"Microsoft Edge";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-  'sec-ch-ua-mobile': '?0',
-  'sec-ch-ua-platform': '"Windows"',
-  'Sec-Fetch-Dest': 'document',
-  'Sec-Fetch-Mode': 'navigate',
-  'Sec-Fetch-Site': 'none',
-  'Sec-Fetch-User': '?1',
-  'Upgrade-Insecure-Requests': '1',
-};
+const SAMRA_API =
+  process.env.TERABOX_SAMRA_API ||
+  'https://samratbdownload.krishnalucky193.workers.dev/';
 
-const LIST_ENDPOINT = 'https://www.terabox.com/share/list';
-
-function headersWithCookie(cookie) {
-  return cookie ? { ...BROWSER_HEADERS, Cookie: cookie } : { ...BROWSER_HEADERS };
-}
-
-// Headers used when streaming the actual file bytes from the dlink/CDN.
-export function downloadHeaders(cookie) {
-  const h = {
-    'User-Agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    Accept: '*/*',
-    'Accept-Language': 'en-US,en;q=0.9',
-    Referer: 'https://www.terabox.com/',
-    DNT: '1',
-  };
-  if (cookie) h.Cookie = cookie;
-  return h;
-}
-
-function extractSurl(finalUrl) {
+function extractSurl(url) {
   try {
-    const u = new URL(finalUrl);
-    const fromQuery = u.searchParams.get('surl');
-    if (fromQuery) return fromQuery;
-    // /s/1AbCd style links: the surl is the path segment minus the leading "1".
+    const u = new URL(url);
     const m = u.pathname.match(/\/s\/([A-Za-z0-9_-]+)/);
     if (m) return m[1].startsWith('1') ? m[1].slice(1) : m[1];
-  } catch {
-    /* fall through */
-  }
-  return null;
+  } catch {}
+  return '';
 }
 
-function extractTokens(html) {
-  const jsToken =
-    findBetween(html, 'fn%28%22', '%22%29') ||
-    (html.match(/jsToken\s*[:=]\s*"([^"]+)"/) || [])[1] ||
-    '';
-  const logid =
-    findBetween(html, 'dp-logid=', '&') ||
-    (html.match(/dp-logid=([A-Za-z0-9%]+)/) || [])[1] ||
-    '';
-  const bdstoken =
-    findBetween(html, 'bdstoken":"', '"') ||
-    (html.match(/bdstoken\\?"\s*:\s*\\?"([^"\\]+)/) || [])[1] ||
-    '';
-  return { jsToken, logid, bdstoken };
-}
+function normalizeSamra(data, shareUrl) {
+  const root = data?.data || data?.result || data;
+  if (!root || typeof root !== 'object') return null;
 
-async function resolveWithOfficialApi(shareUrl, ctx) {
-  const apiKey = String(process.env.TERABOX_API_KEY || '').trim();
-  const apiSecret = String(process.env.TERABOX_API_SECRET || '').trim();
-  if (!apiKey || !apiSecret) return null;
+  const rawFiles =
+    root.files ||
+    root.list ||
+    root.file ||
+    (Array.isArray(root) ? root : [root]);
 
-  const base = String(process.env.TERABOX_API_BASE || 'https://api.teraboxdl.site').replace(/\/$/, '');
-  const endpoint = '/v1/api';
-  const body = JSON.stringify({ url: shareUrl, dir_path: '', page: 1 });
-  const timestamp = Math.floor(Date.now() / 1000).toString();
-  const signature = crypto
-    .createHmac('sha256', apiSecret)
-    .update(`POST${endpoint}${timestamp}${body}`)
-    .digest('hex');
+  const arr = Array.isArray(rawFiles) ? rawFiles : [rawFiles];
 
-  const resp = await fetch(`${base}${endpoint}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Key': apiKey,
-      'X-Timestamp': timestamp,
-      'X-Signature': signature,
-      'User-Agent': UA,
-    },
-    body,
-    signal: AbortSignal.timeout(Math.max(ctx.timeoutMs, 60_000)),
-  });
+  const files = arr
+    .map((f) => {
+      if (!f || typeof f !== 'object') return null;
 
-  const raw = await resp.text();
-  if (!resp.ok) throw new Error(`TeraBox API HTTP ${resp.status}`);
-  let data;
-  try { data = JSON.parse(raw); } catch { throw new Error('TeraBox API returned invalid JSON'); }
+      const dlink =
+        f.download_url ||
+        f.downloadUrl ||
+        f.direct_link ||
+        f.direct_url ||
+        f.dlink ||
+        '';
 
-  if (data?.errno && Number(data.errno) !== 0) {
-    throw new Error(`TeraBox API error ${data.errno}${data.errmsg ? `: ${data.errmsg}` : ''}`);
-  }
+      const stream =
+        f.stream_url ||
+        f.streamUrl ||
+        f.m3u8 ||
+        f.hls ||
+        f.play_url ||
+        '';
 
-  const list = Array.isArray(data?.list) ? data.list : [];
-  const files = list.map((f) => {
-    const dlink = f.direct_link || f.download_url || f.dlink || '';
-    const stream = f.stream_url || f.m3u8 || '';
-    const size = Number(f.size || f.size_bytes || 0) || 0;
-    return {
-      name: f.server_filename || f.filename || f.name || 'file',
-      size: typeof f.formatted_size === 'string' ? f.formatted_size : formatSize(size),
-      size_bytes: size,
-      thumbnail: f.thumbs?.url3 || f.thumbs?.url2 || f.thumbs?.url1 || f.thumbnail || '',
-      dlink: String(dlink || stream),
-      stream_url: String(stream),
-      is_dir: Boolean(f.isdir || f.is_dir),
-      path: f.path || '',
-      fs_id: f.fs_id ? String(f.fs_id) : '',
-    };
-  }).filter((f) => /^https?:\/\//i.test(f.dlink));
+      const link = dlink || stream;
+      if (!/^https?:\/\//i.test(String(link))) return null;
 
-  if (!files.length) throw new Error('TeraBox API returned no downloadable files');
+      const sizeBytes =
+        Number(f.size_bytes || f.sizeBytes || f.bytes || 0) ||
+        (typeof f.size === 'number' ? f.size : 0) ||
+        0;
+
+      const displaySize =
+        (typeof f.size_formatted === 'string' && f.size_formatted) ||
+        (typeof f.formatted_size === 'string' && f.formatted_size) ||
+        (typeof f.size === 'string' && /[a-z]/i.test(f.size) ? f.size : '') ||
+        formatSize(sizeBytes);
+
+      const name =
+        f.file_name ||
+        f.filename ||
+        f.server_filename ||
+        f.name ||
+        f.title ||
+        'terabox.mp4';
+
+      return {
+        name: String(name),
+        size: displaySize,
+        size_bytes: sizeBytes,
+        quality: f.quality || f.resolution || '',
+        extension: f.extension || '',
+        thumbnail: f.thumbnail || f.thumb || f.image || '',
+        dlink: String(dlink || stream),
+        stream_url: stream ? String(stream) : '',
+        is_dir: Boolean(f.isdir || f.is_dir),
+        path: f.path || '',
+        fs_id: f.fs_id ? String(f.fs_id) : '',
+      };
+    })
+    .filter(Boolean);
+
+  if (!files.length) return null;
+
   return {
     provider: name,
     share_url: shareUrl,
     final_url: shareUrl,
-    surl: extractSurl(shareUrl) || '',
-    title: data.title || 'TeraBox Download',
+    surl: extractSurl(shareUrl),
+    title: root.name || root.title || files[0].name,
     files,
   };
-}
-
-async function resolveWithCookie(shareUrl, cookie, ctx) {
-  const timeout = AbortSignal.timeout(ctx.timeoutMs);
-
-  // 1. Follow the share link to the canonical share page (gives us ?surl=).
-  let resp = await fetch(shareUrl, {
-    headers: headersWithCookie(cookie),
-    redirect: 'follow',
-    signal: timeout,
-  });
-  if (!resp.ok) throw new Error(`Share link fetch failed (HTTP ${resp.status})`);
-  const finalUrl = resp.url;
-  const surl = extractSurl(finalUrl);
-  if (!surl) {
-    throw new Error('Invalid share link (no surl found). Check the link or your cookie.');
-  }
-
-  // 2. Load the share page HTML and pull the tokens the internal API requires.
-  resp = await fetch(finalUrl, {
-    headers: headersWithCookie(cookie),
-    redirect: 'follow',
-    signal: timeout,
-  });
-  if (!resp.ok) throw new Error(`Share page fetch failed (HTTP ${resp.status})`);
-  const html = await resp.text();
-  const { jsToken, logid } = extractTokens(html);
-  if (!jsToken || !logid) {
-    throw new Error('Failed to extract tokens from share page (cookie may be expired)');
-  }
-
-  // 3. Call the internal share/list API for file metadata + dlink.
-  const params = new URLSearchParams({
-    app_id: '250528',
-    web: '1',
-    channel: 'dubox',
-    clienttype: '0',
-    jsToken,
-    'dp-logid': logid,
-    page: '1',
-    num: '100',
-    by: 'name',
-    order: 'asc',
-    site_referer: finalUrl,
-    shorturl: surl,
-    root: '1,',
-  });
-  resp = await fetch(`${LIST_ENDPOINT}?${params.toString()}`, {
-    headers: headersWithCookie(cookie),
-    signal: timeout,
-  });
-  if (!resp.ok) throw new Error(`File list fetch failed (HTTP ${resp.status})`);
-  const data = await resp.json();
-  if (data.errno) {
-    throw new Error(`Terabox API error ${data.errno}${data.errmsg ? `: ${data.errmsg}` : ''}`);
-  }
-  if (!Array.isArray(data.list) || data.list.length === 0) {
-    throw new Error('No files found for this share link');
-  }
-
-  const files = data.list.map((f) => ({
-    name: f.server_filename || 'file',
-    size: formatSize(Number.parseInt(f.size, 10) || 0),
-    size_bytes: Number.parseInt(f.size, 10) || 0,
-    thumbnail: (f.thumbs && (f.thumbs.url3 || f.thumbs.url2 || f.thumbs.url1)) || '',
-    dlink: f.dlink || '',
-    is_dir: f.isdir === 1 || f.isdir === '1',
-    path: f.path || '',
-    fs_id: f.fs_id ? String(f.fs_id) : '',
-  }));
-
-  return {
-    provider: name,
-    share_url: shareUrl,
-    final_url: finalUrl,
-    surl,
-    title: data.title || '',
-    files,
-  };
-}
-
-const SAMRA_API = 'https://desibotz-terabox-api.krishnalucky193.workers.dev/api';
-
-function normalizeSamra(data, shareUrl) {
-  const root = data?.data || data?.result || data;
-  const rawFiles = root?.files || root?.list || root?.file || (Array.isArray(root) ? root : [root]);
-  const arr = Array.isArray(rawFiles) ? rawFiles : [rawFiles];
-  const files = arr.map((f) => {
-    if (!f || typeof f !== 'object') return null;
-    const dlink = f.download_url || f.downloadUrl || f.dlink || f.direct_link || f.direct_url || f.url || '';
-    const stream = f.stream_url || f.streamUrl || f.m3u8 || f.play_url || '';
-    const link = dlink || stream;
-    if (!/^https?:\/\//i.test(String(link))) return null;
-    const size = Number(f.size_bytes || f.size || 0) || 0;
-    return {
-      name: f.name || f.filename || f.server_filename || f.title || 'terabox.mp4',
-      size: typeof f.size === 'string' && /[a-z]/i.test(f.size) ? f.size : formatSize(size),
-      size_bytes: size,
-      thumbnail: f.thumbnail || f.thumb || f.image || '',
-      dlink: String(link),
-      stream_url: stream ? String(stream) : '',
-      is_dir: false,
-      path: '',
-      fs_id: f.fs_id ? String(f.fs_id) : '',
-    };
-  }).filter(Boolean);
-  if (!files.length) return null;
-  return { provider: name, share_url: shareUrl, final_url: shareUrl, surl: extractSurl(shareUrl) || '', title: root?.title || files[0].name, files };
 }
 
 async function resolveWithSamra(shareUrl, ctx) {
-  const base = String(process.env.TERABOX_API_URL || SAMRA_API).trim();
-  const u = new URL(base);
+  const u = new URL(SAMRA_API);
   u.searchParams.set('url', shareUrl);
+
   const resp = await fetch(u, {
     headers: { 'User-Agent': UA, Accept: 'application/json' },
     redirect: 'follow',
-    signal: AbortSignal.timeout(ctx.timeoutMs),
+    signal: AbortSignal.timeout(Math.max(ctx.timeoutMs, 60_000)),
   });
+
   const raw = await resp.text();
   if (!resp.ok) throw new Error(`SAMRA API HTTP ${resp.status}`);
+
   let data;
-  try { data = JSON.parse(raw); } catch { throw new Error('SAMRA API returned invalid JSON'); }
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    throw new Error('SAMRA API returned invalid JSON');
+  }
+
+  if (data?.success === false) {
+    throw new Error(data?.message || data?.error || 'SAMRA API reported failure');
+  }
+
   const result = normalizeSamra(data, shareUrl);
   if (!result) throw new Error('SAMRA API returned no downloadable file');
   return result;
 }
 
+export function downloadHeaders() {
+  return { 'User-Agent': UA, Accept: '*/*' };
+}
+
 export async function resolveInfo(shareUrl, ctx) {
-  // Primary route when the managed TeraBox API credentials are configured.
-  if (process.env.TERABOX_API_KEY && process.env.TERABOX_API_SECRET) {
-    try {
-      return await resolveWithOfficialApi(shareUrl, ctx);
-    } catch (err) {
-      console.warn('[terabox] official API failed; trying fallback:', err.message);
-    }
-  }
-
-  // Cookie-free fallback API, then the original Terabox engine.
-  if (String(process.env.TERABOX_SAMRA_API || '1') !== '0') {
-    try {
-      return await resolveWithSamra(shareUrl, ctx);
-    } catch (err) {
-      console.warn('[terabox] SAMRA API failed; trying original engine:', err.message);
-    }
-  }
-
-  const attempts = Math.max(1, Math.min(ctx.cookies.size || 1, 3));
-  let lastError = 'Resolution failed';
-  for (let i = 0; i < attempts; i += 1) {
-    const cookie = ctx.cookies.next() || '';
-    try {
-      return await resolveWithCookie(shareUrl, cookie, ctx);
-    } catch (err) {
-      lastError = err.message;
-    }
-  }
-  throw new Error(lastError);
+  // Single authoritative TeraBox resolver. Old cookie/internal-API engines
+  // were removed because they were unreliable and complicated troubleshooting.
+  return resolveWithSamra(shareUrl, ctx);
 }
