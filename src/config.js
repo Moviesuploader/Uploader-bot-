@@ -33,9 +33,13 @@ export const config = {
   apiRoot: process.env.TELEGRAM_API_ROOT || 'https://api.telegram.org',
   pollTimeoutSec: Number(process.env.POLL_TIMEOUT_SEC || 30),
 
-  // Files larger than this are NOT uploaded to Telegram — the bot sends the
-  // direct link instead. Official Bot API limit is 50MB, so default is 48.
+  // Public Bot API multipart upload ceiling is ~50MB. Larger files are
+  // routed to MTProto when a user session is configured.
   maxFileMb: Number(process.env.MAX_FILE_MB || 48),
+
+  // 0 means no application-level download cap. Telegram transport limits are
+  // handled separately at upload time.
+  downloadMaxMb: Number(process.env.DOWNLOAD_MAX_MB || 0),
 
   downloadDir: process.env.DOWNLOAD_DIR || './downloads',
 
