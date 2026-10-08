@@ -2,9 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { TelegramClient } from 'teleproto';
 import { StringSession } from 'teleproto/sessions';
+import * as mongo from './mongo.js';
 
 const storeFile = path.resolve('data/mtproto.json');
 let clientPromise = null;
+let mongoLoaded = false;
 
 function env(name, fallback = '') {
   return String(process.env[name] || fallback).trim();
@@ -34,6 +36,31 @@ export function getConfig() {
   };
 }
 
+export async function initialize() {
+  if (mongoLoaded) return getConfig();
+  mongoLoaded = true;
+
+  const local = getConfig();
+  if (local.apiId > 0 && local.apiHash && local.session) return local;
+
+  try {
+    const remote = await mongo.getMtprotoConfig();
+    if (remote?.apiId && remote?.apiHash && remote?.session) {
+      writeStore({
+        apiId: Number(remote.apiId),
+        apiHash: String(remote.apiHash),
+        session: String(remote.session),
+      });
+      clientPromise = null;
+      console.log('[mtproto] configuration restored from MongoDB');
+    }
+  } catch (err) {
+    console.warn(`[mtproto] MongoDB restore skipped: ${err.message}`);
+  }
+
+  return getConfig();
+}
+
 export function isEnabled() {
   const c = getConfig();
   return Boolean(c.apiId > 0 && c.apiHash && c.session);
@@ -51,12 +78,22 @@ export function saveConfig({ apiId, apiHash, session }) {
   }
   writeStore(next);
   clientPromise = null;
+
+  // Keep a local copy for immediate use and persist the same configuration
+  // in MongoDB so Koyeb/Heroku redeploys can restore it.
+  mongo.saveMtprotoConfig(next).catch((err) => {
+    console.warn(`[mtproto] MongoDB persistence failed: ${err.message}`);
+  });
+
   return { apiId: next.apiId, configured: true };
 }
 
 export function clearConfig() {
   writeStore({});
   clientPromise = null;
+  mongo.clearMtprotoConfig().catch((err) => {
+    console.warn(`[mtproto] MongoDB clear failed: ${err.message}`);
+  });
 }
 
 export function status() {
