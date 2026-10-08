@@ -50,6 +50,23 @@
     "DISKWALA_API_KEY": {
       "description": "API key for DISKWALA_PROXY_URL. Store as a deployment secret.",
       "required": false
+    },
+    "OWNER_ID": {
+      "description": "Owner Telegram user ID. Can also be set from the owner-only /admin panel.",
+      "required": false
+    },
+    "MONGO_URI": {
+      "description": "Optional MongoDB URI. Can also be set from the owner-only /admin panel.",
+      "required": false
+    },
+    "LOGS_CHANNEL_ID": {
+      "description": "Optional Telegram logs channel/chat ID. Can also be set from the owner-only /admin panel.",
+      "required": false
+    },
+    "DOWNLOAD_MAX_MB": {
+      "description": "0 for unlimited application-level download size.",
+      "value": "0",
+      "required": false
     }
   },
   "formation": {
