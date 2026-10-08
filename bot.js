@@ -89,7 +89,8 @@ function adminPanelText(note = '') {
   return `🛠️ <b>Uploader Bot — Admin Panel</b>\n\n` +
     `👑 Owner ID: <code>${esc(owner || 'Not set')}</code>\n` +
     `🍃 MongoDB: <b>${mg.configured ? (mg.connected ? 'Connected' : 'Configured') : 'Not set'}</b>\n` +
-    `📢 Logs Channel: <code>${esc(a.logsChannelId || 'Not set')}</code>\n\n` +
+    `📢 Logs Channel: <code>${esc(a.logsChannelId || 'Not set')}</code>\n` +
+    `📦 Dump Channel: <code>${esc(a.dumpChannelId || 'Not set')}</code>\n\n` +
     `📱 MTProto API ID: <code>${mt.apiId || 'Not set'}</code>\n` +
     `🔐 API Hash: <b>${mt.hasApiHash ? 'Configured' : 'Not set'}</b>\n` +
     `🪪 Session: <b>${mt.hasSession ? 'Configured' : 'Not set'}</b>\n` +
@@ -106,7 +107,7 @@ function adminPanelMarkup() {
       ],
       [
         { text: '📢 Logs Channel', callback_data: 'adm:logs' },
-        { text: '🧪 Test Mongo', callback_data: 'adm:testmongo' },
+        { text: '📦 Dump Channel', callback_data: 'adm:dump' },
       ],
       [
         { text: '🆔 API ID', callback_data: 'adm:apiid' },
@@ -117,8 +118,15 @@ function adminPanelMarkup() {
         { text: '🧪 Test MTProto', callback_data: 'adm:testmt' },
       ],
       [
+        { text: '🧪 Test Mongo', callback_data: 'adm:testmongo' },
+        { text: '🧪 Test Dump', callback_data: 'adm:testdump' },
+      ],
+      [
         { text: '🗑 Clear Mongo', callback_data: 'adm:clearmongo' },
         { text: '🗑 Clear Logs', callback_data: 'adm:clearlogs' },
+      ],
+      [
+        { text: '🗑 Clear Dump', callback_data: 'adm:cleardump' },
       ],
       [
         { text: '🔄 Refresh', callback_data: 'adm:refresh' },
@@ -167,6 +175,29 @@ async function handleAdminCallback(cq) {
     return;
   }
 
+  if (action === 'testdump') {
+    await tg.answerCallbackQuery(cq.id, 'Testing dump channel…');
+    const dumpId = adminConfig.getConfig().dumpChannelId;
+    if (!dumpId) {
+      await showAdminPanel(chatId, panelId, 'Dump channel is not configured.');
+      return;
+    }
+    try {
+      const test = await tg.sendMessage(dumpId, '🧪 <b>Dump channel test</b>\n\nThis message will be deleted automatically.');
+      await tg.deleteMessage(dumpId, test.message_id);
+      await showAdminPanel(chatId, panelId, 'Dump channel is reachable and bot can post there ✅');
+    } catch (err) {
+      await showAdminPanel(chatId, panelId, `Dump channel test failed: ${err.message}`);
+    }
+    return;
+  }
+
+  if (action === 'cleardump') {
+    adminConfig.clear('dumpChannelId');
+    await tg.answerCallbackQuery(cq.id, 'Dump channel cleared');
+    await showAdminPanel(chatId, panelId);
+    return;
+  }
   if (action === 'testmongo') {
     await tg.answerCallbackQuery(cq.id, 'Testing MongoDB…');
     try {
@@ -220,6 +251,10 @@ async function handleAdminCallback(cq) {
     logs: {
       prompt: '📢 <b>Send Logs Channel ID</b>\n\nExample: <code>-1001234567890</code>\nMake sure the bot is allowed to post there.\n/cancel to return.',
       next: 'logs',
+    },
+    dump: {
+      prompt: '📦 <b>Send Dump Channel ID</b>\n\nDownloaded files will be stored here first, then copied to the user.\nExample: <code>-1001234567890</code>\nMake sure the bot is allowed to post there.\n/cancel to return.',
+      next: 'dump',
     },
     apiid: {
       prompt: '🆔 <b>Send MTProto API ID</b>\n\nOnly the numeric API ID.\n/cancel to return.',
@@ -310,6 +345,23 @@ async function handleAdminInput(msg) {
       }
       adminConfig.save({ logsChannelId: text });
       await finish('Logs channel saved. New download activity will be sent there 📢');
+      return true;
+    }
+    if (state.step === 'dump') {
+      if (!/^-?\d+$/.test(text) && !/^@?[A-Za-z0-9_]{4,}$/.test(text)) {
+        await showAdminPanel(chatId, state.panelMessageId, 'Enter a valid channel/chat ID such as -1001234567890 or a channel username.');
+        return true;
+      }
+      try {
+        adminConfig.save({ dumpChannelId: text });
+        const test = await tg.sendMessage(text, '🧪 <b>Dump channel configured successfully.</b>\n\nThis test message will be deleted.');
+        await tg.deleteMessage(text, test.message_id);
+      } catch (err) {
+        adminConfig.clear('dumpChannelId');
+        await showAdminPanel(chatId, state.panelMessageId, `Could not post to that channel: ${err.message}`);
+        return true;
+      }
+      await finish('Dump channel saved and verified ✅\nDownloaded files will be stored there first, then copied to the user.');
       return true;
     }
 
