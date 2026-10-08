@@ -511,7 +511,7 @@ async function downloadToDisk(dlink, headers, ext = '', onProgress = null) {
     },
   });
   try {
-    await pipeline(Readable.fromWeb(resp.body), guard, fs.createWriteStream(tmp));
+    await pipeline(Readable.fromWeb(resp.body), guard, fs.createWriteStream(tmp, { highWaterMark: 4 * 1024 * 1024 }));
   } catch (err) {
     fs.unlink(tmp, () => {});
     throw err;
