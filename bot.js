@@ -1011,6 +1011,12 @@ async function handleCallback(cq) {
 
 async function main() {
   try {
+    await mtproto.initialize();
+  } catch (err) {
+    console.warn(`[mtproto] initialization warning: ${err.message}`);
+  }
+
+  try {
     const me = await tg.getMe();
     console.log(`Logged in as @${me.username} (id ${me.id})`);
   } catch (err) {
