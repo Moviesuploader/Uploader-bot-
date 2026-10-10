@@ -3,6 +3,14 @@ import * as adminConfig from '../admin-config.js';
 
 export const name = 'custom_api';
 
+const DEFAULT_XHAMSTER = {
+  id: 'xhamster-api',
+  name: 'xHamster API',
+  endpoint: 'https://xhamster-api-a6cq.onrender.com/?provider=<PROVIDER>&url=<URL>&format=json',
+  hosts: ['xhamster.com', 'www.xhamster.com', 'erome.com', 'www.erome.com', 'pornhub.com', 'www.pornhub.com', 'thegandubaba.com', 'indianbf.com'],
+  enabled: true,
+};
+
 const DEFAULT_MEGA = {
   id: 'mega',
   name: 'Mega API',
@@ -14,7 +22,10 @@ const DEFAULT_MEGA = {
 export function getConfiguredApis() {
   const saved = adminConfig.getConfig().apiEndpoints || [];
   const mega = saved.find((x) => x.id === 'mega');
-  return mega ? saved : [DEFAULT_MEGA, ...saved.filter((x) => x.id !== 'mega')];
+  const apis = [...saved];
+  if (!mega) apis.unshift(DEFAULT_MEGA);
+  if (!apis.some((x) => x.id === 'xhamster-api')) apis.push(DEFAULT_XHAMSTER);
+  return apis;
 }
 
 export function normalizeHost(host) {
@@ -39,7 +50,7 @@ function resolveEndpoint(template, shareUrl) {
   const encoded = encodeURIComponent(shareUrl);
   const token = /<\s*(?:MEGA_URL|URL|SHARE_URL)\s*>/i;
   if (token.test(template)) return template.replace(token, encoded);
-  const endpoint = new URL(template);
+  const endpoint = new URL(prepared);
   endpoint.searchParams.set('url', shareUrl);
   return endpoint.toString();
 }
