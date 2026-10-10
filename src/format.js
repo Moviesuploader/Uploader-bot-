@@ -13,6 +13,8 @@ const PROVIDER_STYLE = {
   diskwala: { icon: '🎬', label: 'DISKWALA' },
   terabox: { icon: '🌐', label: 'TERABOX' },
   youtube: { icon: '📺', label: 'YOUTUBE' },
+  mega: { icon: '🚀', label: 'MEGA' },
+  custom_api: { icon: '🔌', label: 'CUSTOM API' },
 };
 
 const SONG_SECTIONS = {
