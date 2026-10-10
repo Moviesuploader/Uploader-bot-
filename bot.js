@@ -15,6 +15,7 @@ import { Cache } from './src/cache.js';
 import * as mtproto from './src/mtproto.js';
 import * as adminConfig from './src/admin-config.js';
 import * as mongo from './src/mongo.js';
+import * as customApi from './src/providers/custom-api.js';
 
 if (!config.botToken) {
   console.error('BOT_TOKEN is missing — set it in .env and restart.');
@@ -110,6 +111,9 @@ function adminPanelMarkup() {
         { text: '📦 Dump Channel', callback_data: 'adm:dump' },
       ],
       [
+        { text: '🔌 API Manager', callback_data: 'adm:apimanager' },
+      ],
+      [
         { text: '🆔 API ID', callback_data: 'adm:apiid' },
         { text: '🔐 API Hash', callback_data: 'adm:apihash' },
       ],
@@ -161,6 +165,62 @@ async function handleAdminCallback(cq) {
   const data = String(cq.data || '');
   const action = data.split(':')[1] || '';
   const panelId = cq.message.message_id;
+
+  if (action === 'apimanager') {
+    await tg.answerCallbackQuery(cq.id);
+    const apis = customApi.getConfiguredApis();
+    const rows = apis.map((api) => [{
+      text: `${api.enabled === false ? '⏸️' : '✅'} ${api.name}`,
+      callback_data: `adm:apitoggle:${api.id || (/mega/i.test(api.name) ? 'mega' : 'custom')}`,
+    }]);
+    rows.push([{ text: '➕ Add Mega API', callback_data: 'adm:apiaddmega' }, { text: '➕ Add Custom API', callback_data: 'adm:apiaddcustom' }]);
+    rows.push([{ text: '🗑 Remove Mega API', callback_data: 'adm:apiremovemega' }]);
+    rows.push([{ text: '🔙 Back to Admin', callback_data: 'adm:refresh' }]);
+    const summary = apis.map((api) => `• ${esc(api.name)} — ${api.enabled === false ? 'disabled' : 'enabled'}`).join('\n') || 'No API endpoints configured.';
+    await tg.editMessageText(chatId, panelId, `🔌 <b>API Manager</b>\n\n${summary}\n\n<i>Custom APIs need an endpoint template and matching link hostnames.</i>`, { reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+
+  if (action === 'apiaddmega') {
+    const apis = customApi.getConfiguredApis();
+    const mega = { id: 'mega', name: 'Mega API', endpoint: 'https://samra-mega-api.onrender.com/api/info?url=<MEGA_URL>', hosts: ['mega.nz', 'www.mega.nz', 'mega.co.nz', 'www.mega.co.nz'], enabled: true };
+    const next = [...apis.filter((x) => x.id !== 'mega'), mega];
+    adminConfig.save({ apiEndpoints: next });
+    await tg.answerCallbackQuery(cq.id, 'Mega API enabled');
+    await showAdminPanel(chatId, panelId, 'Mega API endpoint added/enabled. Use API Manager to manage endpoints.');
+    return;
+  }
+
+  if (action === 'apiremovemega') {
+    const apis = customApi.getConfiguredApis();
+    const mega = apis.find((x) => x.id === 'mega') || { id: 'mega', name: 'Mega API', endpoint: 'https://samra-mega-api.onrender.com/api/info?url=<MEGA_URL>', hosts: ['mega.nz', 'www.mega.nz', 'mega.co.nz', 'www.mega.co.nz'] };
+    adminConfig.save({ apiEndpoints: [...apis.filter((x) => x.id !== 'mega'), { ...mega, enabled: false }] });
+    await tg.answerCallbackQuery(cq.id, 'Mega API disabled');
+    await tg.editMessageText(chatId, panelId, '🔌 <b>Mega API disabled.</b> You can re-enable it from API Manager.', { reply_markup: { inline_keyboard: [[{ text: '🔌 API Manager', callback_data: 'adm:apimanager' }, { text: '🔙 Back', callback_data: 'adm:refresh' }]] } });
+    return;
+  }
+
+  if (action === 'apitoggle') {
+    const id = data.split(':')[2] || '';
+    const apis = customApi.getConfiguredApis();
+    const found = apis.find((x) => String(x.id || x.name) === id);
+    if (!found) {
+      await tg.answerCallbackQuery(cq.id, 'API not found', true);
+      return;
+    }
+    adminConfig.save({ apiEndpoints: apis.map((x) => String(x.id || x.name) === id ? { ...x, enabled: x.enabled === false } : x) });
+    await tg.answerCallbackQuery(cq.id, 'API status updated');
+    await tg.editMessageText(chatId, panelId, '🔌 <b>API status updated.</b>', { reply_markup: { inline_keyboard: [[{ text: '🔌 API Manager', callback_data: 'adm:apimanager' }, { text: '🔙 Back', callback_data: 'adm:refresh' }]] } });
+    return;
+  }
+
+  if (action === 'apiaddcustom') {
+    await tg.answerCallbackQuery(cq.id);
+    startAdminInput(chatId, panelId, 'customApiName');
+    adminSetup.get(String(chatId)).values = {};
+    await tg.editMessageText(chatId, panelId, '➕ <b>Add Custom API — Step 1/3</b>\n\nSend a short API name. Your input will be deleted automatically.\n/cancel to return.', { reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'adm:cancel' }]] } });
+    return;
+  }
 
   if (action === 'refresh') {
     await tg.answerCallbackQuery(cq.id, 'Refreshed');
@@ -312,6 +372,41 @@ async function handleAdminInput(msg) {
   };
 
   try {
+    if (state.step === 'customApiName') {
+      if (text.length < 2 || text.length > 40) {
+        await showAdminPanel(chatId, state.panelMessageId, 'API name must be 2–40 characters.');
+        return true;
+      }
+      state.values.name = text;
+      state.step = 'customApiEndpoint';
+      await tg.editMessageText(chatId, state.panelMessageId, '🔗 <b>Add Custom API — Step 2/3</b>\n\nSend endpoint URL. Include <code>&lt;URL&gt;</code> or <code>&lt;MEGA_URL&gt;</code> where the source link should be inserted.\nExample: <code>https://api.example.com/info?url=&lt;URL&gt;</code>\n/cancel to return.', { reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'adm:cancel' }]] } });
+      return true;
+    }
+    if (state.step === 'customApiEndpoint') {
+      if (!/^https:\/\//i.test(text) || !/^https:\/\/[^\s]+$/i.test(text)) {
+        await showAdminPanel(chatId, state.panelMessageId, 'Endpoint must be a valid HTTPS URL.');
+        return true;
+      }
+      state.values.endpoint = text;
+      state.step = 'customApiHosts';
+      await tg.editMessageText(chatId, state.panelMessageId, '🌐 <b>Add Custom API — Step 3/3</b>\n\nSend supported hostnames separated by commas (without https://). Example: <code>example.com,www.example.com</code>\n/cancel to return.', { reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'adm:cancel' }]] } });
+      return true;
+    }
+    if (state.step === 'customApiHosts') {
+      const hosts = text.split(',').map((h) => h.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '')).filter(Boolean);
+      if (!hosts.length || hosts.some((h) => !/^[a-z0-9.-]+$/.test(h))) {
+        await showAdminPanel(chatId, state.panelMessageId, 'Send valid hostnames separated by commas.');
+        return true;
+      }
+      const apis = customApi.getConfiguredApis();
+      const id = 'custom_' + Date.now().toString(36);
+      apis.push({ id, name: state.values.name, endpoint: state.values.endpoint, hosts, enabled: true });
+      adminConfig.save({ apiEndpoints: apis });
+      adminSetup.delete(String(chatId));
+      await showAdminPanel(chatId, state.panelMessageId, `API “${state.values.name}” saved. Link hosts registered: ${hosts.join(', ')}. Verify its response format with a test link.`);
+      return true;
+    }
+
     if (state.step === 'owner') {
       if (!/^\d+$/.test(text) || Number(text) <= 0) {
         await showAdminPanel(chatId, state.panelMessageId, 'Owner ID must be a positive numeric Telegram user ID.');
