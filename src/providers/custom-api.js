@@ -48,6 +48,14 @@ export function findApiForUrl(url) {
 
 function resolveEndpoint(template, shareUrl) {
   const encoded = encodeURIComponent(shareUrl);
+  // The API's own details_api URLs use ?url=<VIDEO_URL>&format=json.
+  // Older saved admin settings may still include provider=<PROVIDER>, which
+  // can route video links to a listing response instead of video details.
+  if (template.includes('xhamster-api-a6cq.onrender.com')) {
+    template = template
+      .replace(/[?&]provider=<\\s*PROVIDER\\s*>&?/i, (match) => match.startsWith('?') && match.endsWith('&') ? '?' : '')
+      .replace(/[?&]$/, '');
+  }
   const host = new URL(shareUrl).hostname.toLowerCase().replace(/^www\./, '');
   const provider = host.includes('erome') ? 'erome'
     : host.includes('pornhub') ? 'pornhub'
