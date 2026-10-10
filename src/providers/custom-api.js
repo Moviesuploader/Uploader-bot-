@@ -6,7 +6,7 @@ export const name = 'custom_api';
 const DEFAULT_XHAMSTER = {
   id: 'xhamster-api',
   name: 'xHamster API',
-  endpoint: 'https://xhamster-api-a6cq.onrender.com/?provider=<PROVIDER>&url=<URL>&format=json',
+  endpoint: 'https://xhamster-api-a6cq.onrender.com/?url=<URL>&format=json',
   hosts: ['xhamster.com', 'www.xhamster.com', 'erome.com', 'www.erome.com', 'pornhub.com', 'www.pornhub.com', 'thegandubaba.com', 'indianbf.com'],
   enabled: true,
 };
