@@ -61,7 +61,7 @@ const configuredAdmin = adminConfig.getConfig();
 if (configuredAdmin.ownerId) legacyOwnerIds.add(configuredAdmin.ownerId);
 
 function currentOwnerId() {
-  return adminConfig.getConfig().ownerId || String(process.env.OWNER_ID || '').trim() || [...legacyOwnerIds][0] || '';
+  return String(process.env.OWNER_ID || '').trim() || adminConfig.getConfig().ownerId || [...legacyOwnerIds][0] || '';
 }
 
 function isAdmin(chatId) {
@@ -1340,6 +1340,20 @@ async function handleCallback(cq) {
 }
 
 async function main() {
+  // Restore durable admin settings before polling. Set MONGO_URI in deployment env
+  // so the settings store can be reached even when the local filesystem resets.
+  if (String(process.env.MONGO_URI || process.env.MONGODB_URI || '').trim()) {
+    try {
+      const savedSettings = await mongo.getAdminSettings();
+      if (savedSettings) {
+        adminConfig.save({ ...savedSettings, ownerId: String(process.env.OWNER_ID || '').trim() || savedSettings.ownerId || '' });
+        console.log('[admin-config] restored settings from MongoDB');
+      }
+    } catch (err) {
+      console.warn(`[admin-config] MongoDB restore skipped: ${err.message}`);
+    }
+  }
+
   try {
     await mtproto.initialize();
   } catch (err) {
