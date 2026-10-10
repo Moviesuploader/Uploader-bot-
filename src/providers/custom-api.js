@@ -48,8 +48,15 @@ export function findApiForUrl(url) {
 
 function resolveEndpoint(template, shareUrl) {
   const encoded = encodeURIComponent(shareUrl);
-  const token = /<\s*(?:MEGA_URL|URL|SHARE_URL)\s*>/i;
-  if (token.test(template)) return template.replace(token, encoded);
+  const host = new URL(shareUrl).hostname.toLowerCase().replace(/^www\\./, '');
+  const provider = host.includes('erome') ? 'erome'
+    : host.includes('pornhub') ? 'pornhub'
+    : host.includes('thegandubaba') ? 'thegandubaba'
+    : host.includes('indianbf') ? 'indianbf'
+    : 'xhamster';
+  const prepared = template.replace(/<\\s*PROVIDER\\s*>/ig, encodeURIComponent(provider));
+  const token = /<\\s*(?:MEGA_URL|URL|SHARE_URL)\\s*>/i;
+  if (token.test(prepared)) return prepared.replace(token, encoded);
   const endpoint = new URL(prepared);
   endpoint.searchParams.set('url', shareUrl);
   return endpoint.toString();
