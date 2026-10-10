@@ -53,7 +53,7 @@ function resolveEndpoint(template, shareUrl) {
   // can route video links to a listing response instead of video details.
   if (template.includes('xhamster-api-a6cq.onrender.com')) {
     template = template
-      .replace(/[?&]provider=<\\s*PROVIDER\\s*>&?/i, (match) => match.startsWith('?') && match.endsWith('&') ? '?' : '')
+      .replace(/[?&]provider=<\s*PROVIDER\s*>&?/i, (match) => match.startsWith('?') && match.endsWith('&') ? '?' : '')
       .replace(/[?&]$/, '');
   }
   const host = new URL(shareUrl).hostname.toLowerCase().replace(/^www\./, '');
