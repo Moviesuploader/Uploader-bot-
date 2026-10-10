@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node bot.js",
     "dev": "node --watch bot.js",
-    "check": "node --check bot.js && node --check src/mtproto.js"
+    "check": "node --check bot.js && node --check src/mtproto.js && node --check src/admin-config.js && node --check src/providers/index.js && node --check src/providers/custom-api.js && node --check src/format.js"
   },
   "engines": {
     "node": ">=18.17"
