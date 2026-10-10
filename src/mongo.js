@@ -97,3 +97,22 @@ export async function clearMtprotoConfig() {
   await client.db('uploader_bot').collection('settings').deleteOne({ _id: 'mtproto' });
   return true;
 }
+
+
+export async function saveAdminSettings(settings) {
+  // Do not persist Mongo credentials inside the settings document.
+  const { mongoUri, ...safeSettings } = settings || {};
+  const client = await getClient();
+  await client.db('uploader_bot').collection('settings').updateOne(
+    { _id: 'admin-config' },
+    { $set: { config: safeSettings, updatedAt: new Date() } },
+    { upsert: true },
+  );
+  return true;
+}
+
+export async function getAdminSettings() {
+  const client = await getClient();
+  const doc = await client.db('uploader_bot').collection('settings').findOne({ _id: 'admin-config' });
+  return doc?.config && typeof doc.config === 'object' ? doc.config : null;
+}
