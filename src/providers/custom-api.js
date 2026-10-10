@@ -81,7 +81,8 @@ function collectFiles(payload) {
     // Some APIs return a video's quality variants as data.sources[].url.
     const dlink = firstString(
       f.download_url, f.downloadUrl, f.direct_link, f.direct_url, f.dlink,
-      f.download, f.video_url, f.videoUrl, f.url, f.link,
+      f.download, f.video_url, f.videoUrl, f.media_url, f.mediaUrl,
+      f.directDownload, f.direct_download, f.url, f.link,
       f.links?.download, f.links?.direct, f.source?.url
     );
     if (!dlink) return null;
@@ -130,8 +131,15 @@ function itemMatchesUrl(item, shareUrl) {
 async function resolveNestedDetails(json, shareUrl, api, timeoutMs) {
   const root = json?.data || json?.result || json?.response || json;
   const items = Array.isArray(root) ? root : Array.isArray(root?.items) ? root.items : Array.isArray(root?.videos) ? root.videos : Array.isArray(root?.albums) ? root.albums : Array.isArray(root?.data) ? root.data : [];
-  const matched = items.find((item) => itemMatchesUrl(item, shareUrl));
-  const detailUrl = firstString(matched?.details_api, matched?.detailsApi);
+  // Prefer an exact source-URL match. Some API responses rewrite the URL
+  // (canonical URL, tracking query, trailing slash), so if the endpoint returned
+  // exactly one result, safely use that result's details endpoint as a fallback.
+  const matched = items.find((item) => itemMatchesUrl(item, shareUrl))
+    || (items.length === 1 ? items[0] : null);
+  const detailUrl = firstString(
+    matched?.details_api, matched?.detailsApi,
+    matched?.details?.api, matched?.detail_api
+  );
   if (!detailUrl) return json;
 
   // Follow API-provided detail links only when they point to the same API host.
