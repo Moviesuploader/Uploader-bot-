@@ -4,6 +4,7 @@ import * as adminConfig from '../admin-config.js';
 export const name = 'custom_api';
 
 const DEFAULT_MEGA = {
+  id: 'mega',
   name: 'Mega API',
   endpoint: 'https://samra-mega-api.onrender.com/api/info?url=<MEGA_URL>',
   hosts: ['mega.nz', 'www.mega.nz', 'mega.co.nz', 'www.mega.co.nz'],
