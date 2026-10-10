@@ -25,7 +25,7 @@ function writeStore(data) {
 export function getConfig() {
   const saved = readStore();
   return {
-    ownerId: String(saved.ownerId || env('OWNER_ID') || '').trim(),
+    ownerId: String(env('OWNER_ID') || saved.ownerId || '').trim(),
     mongoUri: String(saved.mongoUri || env('MONGO_URI') || env('MONGODB_URI') || '').trim(),
     logsChannelId: String(saved.logsChannelId || env('LOGS_CHANNEL_ID') || '').trim(),
     dumpChannelId: String(saved.dumpChannelId || env('DUMP_CHANNEL_ID') || '').trim(),
@@ -43,6 +43,8 @@ export function save(patch = {}) {
     apiEndpoints: patch.apiEndpoints !== undefined ? patch.apiEndpoints : current.apiEndpoints,
   };
   writeStore(next);
+  // Keep admin settings durable across ephemeral-host redeploys when MONGO_URI is configured.
+  import('./mongo.js').then((m) => m.saveAdminSettings(next)).catch(() => {});
   return next;
 }
 
