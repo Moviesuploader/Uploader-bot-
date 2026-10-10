@@ -18,7 +18,7 @@ export function getConfiguredApis() {
 }
 
 export function normalizeHost(host) {
-  return String(host || '').trim().toLowerCase().replace(/^https?:\\/\\//, '').replace(/\\/.*$/, '').replace(/^www\\./, '');
+  return String(host || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/^www\./, '');
 }
 
 function hostMatches(url, hosts) {
@@ -37,7 +37,7 @@ export function findApiForUrl(url) {
 
 function resolveEndpoint(template, shareUrl) {
   const encoded = encodeURIComponent(shareUrl);
-  const token = /<\\s*(?:MEGA_URL|URL|SHARE_URL)\\s*>/i;
+  const token = /<\s*(?:MEGA_URL|URL|SHARE_URL)\s*>/i;
   if (token.test(template)) return template.replace(token, encoded);
   const endpoint = new URL(template);
   endpoint.searchParams.set('url', shareUrl);
@@ -45,7 +45,7 @@ function resolveEndpoint(template, shareUrl) {
 }
 
 function firstString(...values) {
-  return values.find((v) => typeof v === 'string' && /^https?:\\/\\//i.test(v)) || '';
+  return values.find((v) => typeof v === 'string' && /^https?:\/\//i.test(v)) || '';
 }
 
 function collectFiles(payload) {
@@ -102,7 +102,7 @@ function itemMatchesUrl(item, shareUrl) {
     try {
       const u = new URL(value);
       u.hash = '';
-      return u.toString().replace(/\\/$/, '');
+      return u.toString().replace(/\/$/, '');
     } catch { return ''; }
   };
   const target = normalize(shareUrl);
@@ -118,7 +118,6 @@ async function resolveNestedDetails(json, shareUrl, api, timeoutMs) {
 
   // Follow API-provided detail links only when they point to the same API host.
   // This avoids turning arbitrary response URLs into server-side requests.
-  const apiOrigin = new URL(api.endpoint.replace(/<\\s*(?:MEGA_URL|URL|SHARE_URL)\\s*>/i, 'https%3A%2F%2Fexample.invalid')).origin;
   const detail = new URL(detailUrl);
   if (!['http:', 'https:'].includes(detail.protocol) || detail.hostname !== new URL(api.endpoint).hostname) {
     throw new Error(`${api.name} returned a details_api on an unexpected host`);
