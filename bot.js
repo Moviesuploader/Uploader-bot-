@@ -169,10 +169,13 @@ async function handleAdminCallback(cq) {
   if (action === 'apimanager') {
     await tg.answerCallbackQuery(cq.id);
     const apis = customApi.getConfiguredApis();
-    const rows = apis.map((api) => [{
-      text: `${api.enabled === false ? '⏸️' : '✅'} ${api.name}`,
-      callback_data: `adm:apitoggle:${api.id || (/mega/i.test(api.name) ? 'mega' : 'custom')}`,
-    }]);
+    const rows = apis.map((api) => {
+      const apiId = String(api.id || api.name);
+      return [
+        { text: `${api.enabled === false ? '⏸️' : '✅'} ${api.name}`, callback_data: `adm:apitoggle:${apiId}` },
+        { text: '🗑', callback_data: `adm:apiremove:${apiId}` },
+      ];
+    });
     rows.push([{ text: '➕ Add Mega API', callback_data: 'adm:apiaddmega' }, { text: '➕ Add Custom API', callback_data: 'adm:apiaddcustom' }]);
     rows.push([{ text: '🗑 Remove Mega API', callback_data: 'adm:apiremovemega' }]);
     rows.push([{ text: '🔙 Back to Admin', callback_data: 'adm:refresh' }]);
@@ -197,6 +200,29 @@ async function handleAdminCallback(cq) {
     adminConfig.save({ apiEndpoints: [...apis.filter((x) => x.id !== 'mega'), { ...mega, enabled: false }] });
     await tg.answerCallbackQuery(cq.id, 'Mega API disabled');
     await tg.editMessageText(chatId, panelId, '🔌 <b>Mega API disabled.</b> You can re-enable it from API Manager.', { reply_markup: { inline_keyboard: [[{ text: '🔌 API Manager', callback_data: 'adm:apimanager' }, { text: '🔙 Back', callback_data: 'adm:refresh' }]] } });
+    return;
+  }
+
+  if (action === 'apiremove') {
+    const id = data.split(':')[2] || '';
+    const apis = customApi.getConfiguredApis();
+    const target = apis.find((x) => String(x.id || x.name) === id);
+    if (!target) {
+      await tg.answerCallbackQuery(cq.id, 'API not found', true);
+      return;
+    }
+    let next;
+    if (id === 'mega') {
+      next = [...apis.filter((x) => String(x.id || x.name) !== id), { ...target, id: 'mega', enabled: false }];
+    } else {
+      next = apis.filter((x) => String(x.id || x.name) !== id);
+    }
+    adminConfig.save({ apiEndpoints: next });
+    await tg.answerCallbackQuery(cq.id, 'API removed/disabled');
+    const rows = next.map((api) => [{ text: `${api.enabled === false ? '⏸️' : '✅'} ${api.name}`, callback_data: `adm:apitoggle:${api.id || api.name}` }, { text: '🗑', callback_data: `adm:apiremove:${api.id || api.name}` }]);
+    rows.push([{ text: '➕ Add Mega API', callback_data: 'adm:apiaddmega' }, { text: '➕ Add Custom API', callback_data: 'adm:apiaddcustom' }]);
+    rows.push([{ text: '🔙 Back to Admin', callback_data: 'adm:refresh' }]);
+    await tg.editMessageText(chatId, panelId, `🔌 <b>API Manager</b>\n\nAPI updated: ${esc(target.name)}`, { reply_markup: { inline_keyboard: rows } });
     return;
   }
 
