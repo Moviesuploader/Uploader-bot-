@@ -29,6 +29,7 @@ export function getConfig() {
     mongoUri: String(saved.mongoUri || env('MONGO_URI') || env('MONGODB_URI') || '').trim(),
     logsChannelId: String(saved.logsChannelId || env('LOGS_CHANNEL_ID') || '').trim(),
     dumpChannelId: String(saved.dumpChannelId || env('DUMP_CHANNEL_ID') || '').trim(),
+    apiEndpoints: Array.isArray(saved.apiEndpoints) ? saved.apiEndpoints : [],
   };
 }
 
@@ -39,6 +40,7 @@ export function save(patch = {}) {
     mongoUri: patch.mongoUri !== undefined ? String(patch.mongoUri || '').trim() : current.mongoUri,
     logsChannelId: patch.logsChannelId !== undefined ? String(patch.logsChannelId || '').trim() : current.logsChannelId,
     dumpChannelId: patch.dumpChannelId !== undefined ? String(patch.dumpChannelId || '').trim() : current.dumpChannelId,
+    apiEndpoints: patch.apiEndpoints !== undefined ? patch.apiEndpoints : current.apiEndpoints,
   };
   writeStore(next);
   return next;
